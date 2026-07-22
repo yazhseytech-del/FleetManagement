@@ -2,7 +2,14 @@ import { useState } from "react";
 import { C, mono, fmt, totalInv, generateTargetOptions } from "./theme";
 import { Btn, Input } from "./components";
 
-const STEPS = ["Purchase Details", "Investment Summary", "Rental Info", "System Suggestions", "Confirm"];
+const STEPS = ["Purchase Details", "Investment Summary", "System Suggestions", "Confirm"];
+
+// Maintenance % and the rental price band are no longer collected from the
+// user in this wizard — they're fixed system fallbacks so generateTargetOptions
+// still has a rate range and maintenance assumption to work with.
+const DEFAULT_MAINT_PCT = 7.5;
+const DEFAULT_MIN_RATE = 70;
+const DEFAULT_MAX_RATE = 110;
 
 const emptyCar = () => ({
   plate: "",
@@ -19,16 +26,14 @@ const emptyCar = () => ({
 });
 
 // Full onboarding flow for a new car: enter what it cost, let the system total
-// the investment automatically, enter the rental price band, then pick one of
-// 3 system-generated targets. Finishing hands a complete car record — including
-// the chosen target — up to the parent, which is the only thing that actually
+// the investment automatically, then pick one of 3 system-generated targets
+// (maintenance % and rental price band are fixed system defaults, no longer
+// entered by the user). Finishing hands a complete car record — including the
+// chosen target — up to the parent, which is the only thing that actually
 // gets saved to fleet data.
 const AddCarWizard = ({ onComplete, onClose }) => {
   const [step, setStep] = useState(0);
   const [car, setCar] = useState(emptyCar());
-  const [maintPct, setMaintPct] = useState(7.5);
-  const [minRate, setMinRate] = useState("");
-  const [maxRate, setMaxRate] = useState("");
   const [options, setOptions] = useState(null);
   const [chosen, setChosen] = useState(null);
 
@@ -41,23 +46,24 @@ const AddCarWizard = ({ onComplete, onClose }) => {
     (parseFloat(car.otherCharges) || 0);
 
   const canProceedStep0 = car.plate && car.make && car.model && car.year && car.purchase && car.coe;
-  const canProceedStep2 = minRate && maxRate && parseFloat(minRate) > 0 && parseFloat(maxRate) > 0 && parseFloat(minRate) <= parseFloat(maxRate);
 
   const handleGenerate = () => {
     // theme.js's generateTargetOptions now targets a CAGR per tier (Conservative/
     // Balanced/Aggressive anchored around 11%), compounded over the years left to
     // COE expiry, so it needs purchaseDate as well as coe to work out that horizon.
+    // Maintenance % and the rental rate band are no longer entered by the user —
+    // fixed defaults stand in for them here.
     const opts = generateTargetOptions({
       investment,
       purchaseDate: car.purchaseDate,
       coe: car.coe,
-      maintPct,
-      minRate: parseFloat(minRate),
-      maxRate: parseFloat(maxRate),
+      maintPct: DEFAULT_MAINT_PCT,
+      minRate: DEFAULT_MIN_RATE,
+      maxRate: DEFAULT_MAX_RATE,
     });
     setOptions(opts);
     setChosen(null);
-    setStep(3);
+    setStep(2);
   };
 
   const handleFinish = () => {
@@ -70,9 +76,9 @@ const AddCarWizard = ({ onComplete, onClose }) => {
       year: parseInt(car.year),
       purchaseDate: car.purchaseDate,
       coe: car.coe,
-      maint: maintPct,
-      minRate: parseFloat(minRate),
-      maxRate: parseFloat(maxRate),
+      maint: DEFAULT_MAINT_PCT,
+      minRate: DEFAULT_MIN_RATE,
+      maxRate: DEFAULT_MAX_RATE,
       targetRate: chosen.rate,
       runningDaysTarget: chosen.runningDays,
       profitPctTarget: chosen.profitPct,
@@ -150,27 +156,8 @@ const AddCarWizard = ({ onComplete, onClose }) => {
             </div>
           )}
 
-          {/* STEP 2 — Rental Info */}
-          {step === 2 && (
-            <div>
-              <div style={{ marginBottom: 14 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.textMuted, marginBottom: 6 }}>
-                  <span>Maintenance %</span>
-                  <span style={{ ...mono, fontWeight: 700, color: C.navy }}>{maintPct}%</span>
-                </div>
-                <input type="range" min="5" max="10" step="0.5" value={maintPct}
-                  onChange={e => setMaintPct(parseFloat(e.target.value))}
-                  style={{ width: "100%", accentColor: C.teal }} />
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <Input label="Minimum Rental Price ($/day)" type="number" value={minRate} onChange={e => setMinRate(e.target.value)} placeholder="e.g., 70" />
-                <Input label="Maximum Rental Price ($/day)" type="number" value={maxRate} onChange={e => setMaxRate(e.target.value)} placeholder="e.g., 110" />
-              </div>
-            </div>
-          )}
-
-          {/* STEP 3 — System Suggestions */}
-          {step === 3 && options && (
+          {/* STEP 2 — System Suggestions */}
+          {step === 2 && options && (
             <div>
               <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 12 }}>Pick the target that fits — each tier targets a different annual return (CAGR) compounded over the car's remaining COE runway; higher-return tiers assume fewer running days per month.</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
@@ -206,8 +193,8 @@ const AddCarWizard = ({ onComplete, onClose }) => {
             </div>
           )}
 
-          {/* STEP 4 — Confirm */}
-          {step === 4 && chosen && (
+          {/* STEP 3 — Confirm */}
+          {step === 3 && chosen && (
             <div>
               <div style={{ padding: 14, background: C.greenFaint, borderRadius: 8, borderLeft: `3px solid ${C.green}`, marginBottom: 14 }}>
                 <div style={{ fontSize: 12, fontWeight: 700, color: C.green }}>✓ {chosen.label} target selected</div>
@@ -239,10 +226,9 @@ const AddCarWizard = ({ onComplete, onClose }) => {
           <div style={{ display: "flex", gap: 8 }}>
             <Btn secondary onClick={onClose}>Cancel</Btn>
             {step === 0 && <Btn primary onClick={() => setStep(1)} disabled={!canProceedStep0} style={{ opacity: canProceedStep0 ? 1 : 0.5 }}>Next</Btn>}
-            {step === 1 && <Btn primary onClick={() => setStep(2)}>Next</Btn>}
-            {step === 2 && <Btn primary onClick={handleGenerate} disabled={!canProceedStep2} style={{ opacity: canProceedStep2 ? 1 : 0.5 }}>Generate Suggestions</Btn>}
-            {step === 3 && <Btn primary onClick={() => setStep(4)} disabled={!chosen} style={{ opacity: chosen ? 1 : 0.5 }}>Next</Btn>}
-            {step === 4 && <Btn primary onClick={handleFinish}>Add Car</Btn>}
+            {step === 1 && <Btn primary onClick={handleGenerate}>Generate Suggestions</Btn>}
+            {step === 2 && <Btn primary onClick={() => setStep(3)} disabled={!chosen} style={{ opacity: chosen ? 1 : 0.5 }}>Next</Btn>}
+            {step === 3 && <Btn primary onClick={handleFinish}>Add Car</Btn>}
           </div>
         </div>
       </div>

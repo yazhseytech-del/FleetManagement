@@ -218,7 +218,7 @@ const VehicleDetailsModal = ({ car, bookings, expenses, onAddExpense, onUpdateCa
           
           {/* Status & Registration Alert */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${C.border}` }}>
-            <StatusTag status={car.status} />
+            <StatusTag status={toFleetPageStatus(car.status)} />
             {inMaintenance ? (
               <div style={{
                 fontSize: 10.5, fontWeight: 600, padding: "6px 10px", borderRadius: 8,
@@ -349,6 +349,21 @@ export const STATUS_PILL_FAINT = {
 const getStatusPillColor = (status) => STATUS_PILL_COLORS[status] || C.navy;
 const getStatusPillFaint = (status) => STATUS_PILL_FAINT[status] || C.tealFaint;
 
+// Fleet page only ever needs to distinguish Available / On Rental / Maintenance.
+// "Upcoming" and "Ending Today" are booking-level nuances the Dashboard and
+// Booking module still rely on — the underlying car.status (and everything
+// computeFleetStatus/Dashboard/Booking derive from it) is untouched. This is
+// purely a presentation-layer remap applied right before this page renders a
+// status pill or filters by status:
+//   Upcoming      → Available    (car is free until the future booking starts)
+//   Ending Today  → On Rental    (still out until the day ends)
+//   everything else passes through unchanged
+const FLEET_PAGE_STATUS_MAP = {
+  Upcoming: "Available",
+  "Ending Today": "On Rental",
+};
+const toFleetPageStatus = (status) => FLEET_PAGE_STATUS_MAP[status] || status;
+
 // ─────────────────────────────────────────────────────────────────────────
 // Fleet — table/filter list + modal details overlay
 // ─────────────────────────────────────────────────────────────────────────
@@ -371,7 +386,7 @@ const Fleet = ({ fleet = [], onAddFleet, onUpdateCar, onDeleteCar, onCompleteMai
   // full fleet so the numbers on the pills don't shift as other filters change.
   const statusCounts = useMemo(() => {
     const counts = {};
-    fleet.forEach(c => { counts[c.status] = (counts[c.status] || 0) + 1; });
+    fleet.forEach(c => { const s = toFleetPageStatus(c.status); counts[s] = (counts[s] || 0) + 1; });
     return counts;
   }, [fleet]);
   const statusPillOptions = useMemo(() => {
@@ -389,13 +404,13 @@ const Fleet = ({ fleet = [], onAddFleet, onUpdateCar, onDeleteCar, onCompleteMai
         car.model.toLowerCase().includes(searchLower) ||
         car.year.toString().includes(searchLower) ||
         car.color.toLowerCase().includes(searchLower) ||
-        car.status.toLowerCase().includes(searchLower);
+        toFleetPageStatus(car.status).toLowerCase().includes(searchLower);
 
       // Plate filter
       const matchesPlate = selectedPlate === "All Plates" || car.plate === selectedPlate;
 
       // Status pill filter (All / Available / Maintenance / ...)
-      const matchesStatusPill = statusPillFilter === "All" || car.status === statusPillFilter;
+      const matchesStatusPill = statusPillFilter === "All" || toFleetPageStatus(car.status) === statusPillFilter;
 
       // Registration expiry filter (car.coe field kept for data compatibility)
       let matchesCOE = true;
@@ -666,7 +681,7 @@ const Fleet = ({ fleet = [], onAddFleet, onUpdateCar, onDeleteCar, onCompleteMai
                     {c.coe} {d < 30 ? "⚠" : d < 90 ? "⚡" : ""}
                   </td>
                   <td style={{ padding: "11px 12px", ...mono, fontSize: 11 }}>{c.maint}%</td>
-                  <td style={{ padding: "11px 12px" }}><StatusTag status={c.status} /></td>
+                  <td style={{ padding: "11px 12px" }}><StatusTag status={toFleetPageStatus(c.status)} /></td>
                   <td style={{ padding: "11px 12px" }}>
                     <span style={{ fontSize: 11, color: C.teal, fontWeight: 600 }}>Details →</span>
                   </td>
