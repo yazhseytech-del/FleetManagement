@@ -1,12 +1,12 @@
 import { useState } from "react";
 import { C } from "./theme";
 import { Btn, Badge, Modal, Input, Select } from "./components";
-import { useFleetData } from "./useFleetData";
+import { useFleetData, buildAvailabilityConflictMessage } from "./useFleetData";
 import AddCarWizard from "./AddCarWizard";
 
 import Dashboard from "./Dashboard";
 import Fleet from "./Fleet";
-import Booking from "./Booking";
+import Booking, { AvailabilityTimeline } from "./Booking";
 import Earning from "./Earning";
 import Expenses from "./Expenses";
 import PlReport from "./pl report";
@@ -21,6 +21,32 @@ export default function FleetOpzApp() {
   const [showNewFleet, setShowNewFleet] = useState(false);
   const [showNewUser, setShowNewUser] = useState(false);
 
+  // No real auth in this build — the sidebar footer identity (Selvakumar /
+  // Admin) is the de facto "logged in" user. Role gates (like who can see
+  // Restricted Driving Licenses) read from this rather than being hardcoded
+  // in each screen, so swapping in real auth later only means changing this.
+  const [currentUserRole] = useState("Admin");
+
+  // Driving licenses blocked from being used on a new booking (active
+  // criminal case, court restriction, etc). Lifted up here — rather than
+  // owned by Settings — because Booking creation needs to read it too.
+  const [restrictedLicenses, setRestrictedLicenses] = useState([
+    { id: "RL-1001", licenseNumber: "DL-2024-88213", reason: "Criminal Case", addedDate: "2026-05-10" },
+  ]);
+
+  const addRestrictedLicense = (entry) => {
+    setRestrictedLicenses(prev => [
+      ...prev,
+      { id: `RL-${Date.now()}`, addedDate: new Date().toISOString().slice(0, 10), ...entry },
+    ]);
+  };
+  const updateRestrictedLicense = (id, updates) => {
+    setRestrictedLicenses(prev => prev.map(r => r.id === id ? { ...r, ...updates } : r));
+  };
+  const deleteRestrictedLicense = (id) => {
+    setRestrictedLicenses(prev => prev.filter(r => r.id !== id));
+  };
+
   // Initialize fleet data management hook
   const fleetData = useFleetData();
 
@@ -28,13 +54,17 @@ export default function FleetOpzApp() {
     plate: "",
     customer: "",
     ic: "",
+    
     contact: "",
     start: "",
     end: "",
     pickup: "",
     drop: "",
-    rate: ""
+    rate: "",
+    attachment: null,   // { name, type, size, dataUrl } once a valid file is chosen
+    comments: "",
   });
+  const [attachmentError, setAttachmentError] = useState("");
 
   const [newUserData, setNewUserData] = useState({
     name: "",
@@ -77,7 +107,11 @@ export default function FleetOpzApp() {
         onAddFleet={fleetData.addFleet}  // ✅ CRITICAL FIX: Pass the actual handler that will be called by AddCarWizard
         onUpdateCar={fleetData.updateFleet}
         onDeleteCar={fleetData.deleteFleet}
+        onCompleteMaintenance={fleetData.completeMaintenance}
         calculateCarMetrics={fleetData.calculateCarMetrics}
+        bookings={fleetData.bookings}
+        expenses={fleetData.expenses}
+        onAddExpense={fleetData.addExpense}
       />
     ),
     bookings: (
@@ -127,7 +161,16 @@ export default function FleetOpzApp() {
         fleet={fleetData.fleet}
       />
     ),
-    settings: <Settings onAddUser={() => setShowNewUser(true)} />,
+    settings: (
+      <Settings
+        onAddUser={() => setShowNewUser(true)}
+        currentUserRole={currentUserRole}
+        restrictedLicenses={restrictedLicenses}
+        onAddRestrictedLicense={addRestrictedLicense}
+        onUpdateRestrictedLicense={updateRestrictedLicense}
+        onDeleteRestrictedLicense={deleteRestrictedLicense}
+      />
+    ),
   };
 
   const topbar = {
@@ -141,10 +184,112 @@ export default function FleetOpzApp() {
     settings: { title: "Settings", sub: "Company profile and users" },
   };
 
+  const ALLOWED_ATTACHMENT_EXTENSIONS = ["jpg", "jpeg", "png", "pdf", "doc", "docx", "xls", "xlsx"];
+  const MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024; // 5MB
+
+  const handleAttachmentChange = (e) => {
+    const file = e.target.files[0];
+    e.target.value = ""; // reset so choosing the same file again still fires onChange
+    if (!file) return;
+
+    const ext = file.name.split(".").pop().toLowerCase();
+    if (!ALLOWED_ATTACHMENT_EXTENSIONS.includes(ext)) {
+      setAttachmentError(`Unsupported file type ".${ext}". Allowed: JPG, JPEG, PNG, PDF, DOC, DOCX, XLS, XLSX.`);
+      return;
+    }
+    if (file.size > MAX_ATTACHMENT_SIZE) {
+      setAttachmentError(`File is too large (${(file.size / (1024 * 1024)).toFixed(1)}MB). Maximum size is 5MB.`);
+      return;
+    }
+
+    setAttachmentError("");
+    const reader = new FileReader();
+    reader.onload = () => {
+      setNewBookingData(prev => ({
+        ...prev,
+        attachment: { name: file.name, type: file.type, size: file.size, dataUrl: reader.result },
+      }));
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Accepts either a 15-digit UAE Emirates ID (784-YYYY-NNNNNNN-N) or a
+  // passport number (6-9 alphanumeric characters) — Dubai rentals commonly
+  // serve both UAE residents and international tourists.
+  const isValidEmiratesIdOrPassport = (v) => {
+    const digitsOnly = v.replace(/[^0-9]/g, "");
+    if (digitsOnly.length === 15) return digitsOnly.startsWith("784");
+    const alnum = v.replace(/[^A-Z0-9]/gi, "");
+    return /^[A-Z0-9]{6,9}$/i.test(alnum);
+  };
+
+  // Booking/Return now capture date + time (datetime-local, e.g.
+  // "2026-07-21T14:30"), so format them for anything shown back to the user.
+  const formatDateTime = (v) => {
+    if (!v) return "";
+    const d = new Date(v);
+    if (isNaN(d)) return v;
+    return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  };
+
   const handleNewBookingSubmit = (e) => {
     e.preventDefault();
-    if (!newBookingData.plate || !newBookingData.customer || !newBookingData.start || !newBookingData.end || !newBookingData.rate) {
-      alert("Please fill in all required fields");
+    
+    if (newBookingData.contact.length !== 10) {
+      alert("Contact number must be exactly 10 digits");
+      return;
+    }
+    if (!isValidEmiratesIdOrPassport(newBookingData.ic)) {
+      alert("Enter a valid Emirates ID (15 digits, e.g. 784-1990-1234567-1) or a passport number (6-9 characters)");
+      return;
+    }
+    // Pickup/Drop Location are required — an empty or whitespace-only value
+    // isn't a real location, so trim before checking.
+    if (!newBookingData.pickup.trim()) {
+      alert("Pickup Location is required");
+      return;
+    }
+    if (!newBookingData.drop.trim()) {
+      alert("Drop Location is required");
+      return;
+    }
+    // Block booking outright if this driving license is on the restricted
+    // list (active criminal case, court restriction, etc). Checked
+    // case/whitespace-insensitively since Settings and this form both
+    // uppercase on entry, but stay defensive either way.
+    const normalizeLicense = (v) => (v || "").trim().toUpperCase();
+    const restrictedMatch = restrictedLicenses.find(
+      r => normalizeLicense(r.licenseNumber) === normalizeLicense(newBookingData.license)
+    );
+    if (restrictedMatch) {
+      alert("This driving license has an active criminal case. Booking cannot be created.");
+      return;
+    }
+    if (Number(newBookingData.rate) < 0) {
+      alert("Daily rate cannot be negative");
+      return;
+    }
+    // Return date/time must always be after the booking date/time.
+    if (new Date(newBookingData.end) <= new Date(newBookingData.start)) {
+      alert("Return Date & Time must be after the Booking Date & Time");
+      return;
+    }
+    // The selected car must actually exist (defends against a stale dropdown
+    // — e.g. it was deleted from the fleet while this modal was open). Its
+    // current fleet status (Available/Upcoming/On Rental/Maintenance) is
+    // NOT checked here — a car with a future booking is still bookable for
+    // any date range before that booking starts. The conflict check below,
+    // driven entirely by the requested dates, is the single source of truth
+    // for whether this specific range is actually free.
+    const selectedCar = fleetData.fleet.find(c => c.plate === newBookingData.plate);
+    if (!selectedCar) {
+      alert(`${newBookingData.plate} could not be found in the fleet. Please pick another car.`);
+      return;
+    }
+    // Prevent double-booking: same car, overlapping dates.
+    const conflict = fleetData.checkBookingConflict(newBookingData.plate, newBookingData.start, newBookingData.end);
+    if (conflict) {
+      alert(buildAvailabilityConflictMessage(conflict, newBookingData.start));
       return;
     }
     fleetData.addBooking({
@@ -152,7 +297,8 @@ export default function FleetOpzApp() {
       status: "Active",
     });
     alert(`Booking created for ${newBookingData.customer} on ${newBookingData.plate}`);
-    setNewBookingData({ plate: "", customer: "", ic: "", contact: "", start: "", end: "", pickup: "", drop: "", rate: "" });
+    setNewBookingData({ plate: "", customer: "", ic: "",  contact: "", start: "", end: "", pickup: "", drop: "", rate: "", attachment: null, comments: "" });
+    setAttachmentError("");
     setShowNewBooking(false);
   };
 
@@ -276,43 +422,59 @@ export default function FleetOpzApp() {
             const plate = e.target.value;
             const car = fleetData.fleet.find(c => c.plate === plate);
             if (car && !car.targetRate) {
-              // No saved target rate for this car — don't block the booking.
-              // Just clear the rate so staff can type it in manually below.
+              alert(`No target rental rate set for ${plate}. Please set a target rate in Fleet before booking this car.`);
               setNewBookingData({ ...newBookingData, plate, rate: "" });
               return;
             }
             setNewBookingData({ ...newBookingData, plate, rate: car ? car.targetRate : "" });
           }}
-          options={fleetData.fleet.map(c => ({ value: c.plate, label: c.plate }))}
+          options={
+            fleetData.fleet.length > 0
+              ? fleetData.fleet.map(c => ({ value: c.plate, label: c.plate }))
+              : [{ value: "", label: "No cars in fleet" }]
+          }
         />
+        {newBookingData.plate && (
+          <AvailabilityTimeline
+            car={fleetData.fleet.find(c => c.plate === newBookingData.plate)}
+            bookings={fleetData.bookings}
+          />
+        )}
         <Input
           label="Customer Name"
           value={newBookingData.customer}
           onChange={(e) => setNewBookingData({ ...newBookingData, customer: e.target.value })}
-          placeholder="e.g., Ahmad bin Razif"
+          placeholder="e.g., Ahmed Al Mansoori"
         />
-        <Input
+         <Input
           label="IC Number"
           value={newBookingData.ic}
-          onChange={(e) => setNewBookingData({ ...newBookingData, ic: e.target.value })}
+          onChange={(e) => {
+            let v = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+            if (v.length > 9) v = v.slice(0, 9);
+            setNewBookingData({ ...newBookingData, ic: v });
+          }}
           placeholder="e.g., S8901234A"
         />
         <Input
           label="Contact Number"
           value={newBookingData.contact}
-          onChange={(e) => setNewBookingData({ ...newBookingData, contact: e.target.value })}
-          placeholder="e.g., 91234567"
+          onChange={(e) => {
+            const v = e.target.value.replace(/\D/g, "").slice(0, 10);
+            setNewBookingData({ ...newBookingData, contact: v });
+          }}
+          placeholder="e.g., 0501234567"
         />
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <Input
-            label="Start Date"
-            type="date"
+            label="Start Date & Time"
+            type="datetime-local"
             value={newBookingData.start}
             onChange={(e) => setNewBookingData({ ...newBookingData, start: e.target.value })}
           />
           <Input
-            label="End Date"
-            type="date"
+            label="End Date & Time"
+            type="datetime-local"
             value={newBookingData.end}
             onChange={(e) => setNewBookingData({ ...newBookingData, end: e.target.value })}
           />
@@ -322,23 +484,91 @@ export default function FleetOpzApp() {
             label="Pickup Location"
             value={newBookingData.pickup}
             onChange={(e) => setNewBookingData({ ...newBookingData, pickup: e.target.value })}
-            placeholder="e.g., Jurong East"
+            placeholder="e.g., Dubai Marina"
           />
           <Input
             label="Drop Location"
             value={newBookingData.drop}
             onChange={(e) => setNewBookingData({ ...newBookingData, drop: e.target.value })}
-            placeholder="e.g., Jurong East"
+            placeholder="e.g., Downtown Dubai"
           />
         </div>
         <Input
-          label="Daily Rate ($)"
+          label="Daily Rate (AED)"
           type="number"
+          min="0"
           value={newBookingData.rate}
-          readOnly
-          disabled
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v !== "" && Number(v) < 0) return;
+            setNewBookingData({ ...newBookingData, rate: v });
+          }}
           placeholder="Select a car to auto-fill"
         />
+
+        {/* File Attachment */}
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ fontSize: 11, fontWeight: 600, color: C.textSec, display: "block", marginBottom: 6 }}>
+            File Attachment <span style={{ fontWeight: 400, color: C.textMuted }}>( image or document, max 5MB)</span>
+          </label>
+
+          {!newBookingData.attachment ? (
+            <input
+              type="file"
+              accept=".jpg,.jpeg,.png,.pdf,.doc,.docx,.xls,.xlsx"
+              onChange={handleAttachmentChange}
+              style={{ fontSize: 12, fontFamily: "inherit", width: "100%" }}
+            />
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 8, border: `1px solid ${C.border}`, borderRadius: 8, background: C.bg }}>
+              {newBookingData.attachment.type.startsWith("image/") ? (
+                <img src={newBookingData.attachment.dataUrl} alt="attachment preview" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 6, border: `1px solid ${C.border}` }} />
+              ) : (
+                <div style={{ width: 40, height: 40, borderRadius: 6, background: C.tealFaint, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0 }}>📄</div>
+              )}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: C.navy, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{newBookingData.attachment.name}</div>
+                <div style={{ fontSize: 10, color: C.textMuted }}>{(newBookingData.attachment.size / 1024).toFixed(0)} KB</div>
+              </div>
+              <button type="button" onClick={() => setNewBookingData({ ...newBookingData, attachment: null })}
+                style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 11, fontWeight: 600, flexShrink: 0 }}>
+                Remove
+              </button>
+            </div>
+          )}
+
+          {attachmentError && (
+            <div style={{ fontSize: 11, color: C.red, marginTop: 6 }}>{attachmentError}</div>
+          )}
+
+          <div style={{ marginTop: 10 }}>
+            <Input
+              label="Driving License Number"
+              value={newBookingData.license}
+              onChange={(e) => setNewBookingData({ ...newBookingData, license: e.target.value.toUpperCase() })}
+              placeholder="e.g., DL-2024-88213"
+            />
+            {newBookingData.license && restrictedLicenses.some(
+              r => r.licenseNumber.trim().toUpperCase() === newBookingData.license.trim().toUpperCase()
+            ) && (
+              <div style={{ fontSize: 11, color: C.red, marginTop: -8, fontWeight: 600 }}>
+                This driving license has an active criminal case. Booking cannot be created.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Comments */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 600, color: C.textSec, display: "block", marginBottom: 6 }}>Comments</label>
+          <textarea
+            value={newBookingData.comments}
+            onChange={(e) => setNewBookingData({ ...newBookingData, comments: e.target.value })}
+            placeholder="Any notes about the attachment "
+            rows={3}
+            style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 12, fontFamily: "inherit", outline: "none", resize: "vertical", boxSizing: "border-box" }}
+          />
+        </div>
       </Modal>
 
       {/* NEW USER MODAL */}
@@ -360,7 +590,7 @@ export default function FleetOpzApp() {
           type="email"
           value={newUserData.email}
           onChange={(e) => setNewUserData({ ...newUserData, email: e.target.value })}
-          placeholder="e.g., aisyah@sgwheels.com"
+          placeholder="e.g., aisyah@dubaidrive.ae"
         />
         <Select
           label="Role"

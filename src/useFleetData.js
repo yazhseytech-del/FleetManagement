@@ -32,28 +32,173 @@ const savePersisted = (key, value) => {
   }
 };
 
+// A car should never sit in "Maintenance" for more than this many days before
+// being auto-released back to "Available" (see the effect below). Exported so
+// anything projecting future availability (e.g. the Booking module's 10-day
+// timeline) uses the exact same window instead of a second hardcoded number.
+export const MAINTENANCE_MAX_DAYS = 3;
+
+// Normalizes any date-ish value (a plain "YYYY-MM-DD" or a full datetime
+// string/timestamp) down to its calendar date. Needed because booking.start
+// and booking.end carry a specific pickup/return time — comparing those
+// directly against a plain todayStr as strings is unreliable (e.g. a booking
+// starting today at 12:29 pm would string-compare as "later" than today's
+// bare date and get misread as Upcoming instead of Active). Falls back to a
+// straight slice if the value isn't parseable, rather than throwing.
+const toDateStr = (v) => {
+  const d = new Date(v);
+  return isNaN(d) ? String(v).slice(0, 10) : d.toISOString().slice(0, 10);
+};
+
 // ── STATUS DERIVATION ────────────────────────────────────────────────────────
 // Booking status is derived from today's date vs start/end, instead of being a
 // static field that only changes when someone clicks a button. "Cancelled" is
-// the one status nothing can infer from dates, so it stays a manual flag.
-const computeBookingStatus = (booking, todayStr) => {
+// one status nothing can infer from dates, so it stays a manual flag — and so
+// does "forceCompleted", which lets staff close a booking early (car returned
+// ahead of schedule) without needing every other status to become manual too.
+// Exported so any screen that needs "what would this booking's status be on
+// date X" (not just today) can reuse this exact logic — e.g. the Booking
+// module's forward-looking availability timeline calls this once per day.
+export const computeBookingStatus = (booking, todayStr) => {
   if (booking.cancelled) return "Cancelled";
+  if (booking.forceCompleted) return "Completed";
   if (!booking.start || !booking.end) return booking.status || "Active";
-  if (todayStr < booking.start) return "Upcoming";
-  if (todayStr === booking.end) return "Ending Today";
-  if (todayStr > booking.end) return "Completed";
+  const startStr = toDateStr(booking.start);
+  const endStr = toDateStr(booking.end);
+  if (todayStr < startStr) return "Upcoming";
+  if (todayStr === endStr) return "Ending Today";
+  if (todayStr > endStr) return "Completed";
   return "Active"; // start <= today < end
 };
 
-// A car's status is derived from whether it currently has a booking that puts
-// it "out" (Active or Ending Today). "Maintenance" is the one status nothing
-// can infer from bookings, so — like Cancelled above — it stays a manual flag.
+// A car's status is fully derived — Maintenance is the one state that can't
+// be inferred from bookings alone (it's a manual/automatic flag set when a
+// rental completes, and cleared when maintenance is completed), everything
+// else follows directly from the car's own bookings:
+//   Maintenance   → set by the "booking completed" effect below / cleared by completeMaintenance()
+//   Ending Today  → has a booking whose derived status is "Ending Today"
+//   On Rental     → has a booking whose derived status is "Active"
+//   Upcoming      → has a future booking ("Upcoming") and nothing above applies
+//   Available     → none of the above
 const computeFleetStatus = (car, bookingsWithStatus) => {
   if (car.status === "Maintenance") return "Maintenance";
-  const isOut = bookingsWithStatus.some(
-    b => b.plate === car.plate && (b.status === "Active" || b.status === "Ending Today")
+  const carBookings = bookingsWithStatus.filter(b => b.plate === car.plate);
+  if (carBookings.some(b => b.status === "Ending Today")) return "Ending Today";
+  if (carBookings.some(b => b.status === "Active")) return "On Rental";
+  if (carBookings.some(b => b.status === "Upcoming")) return "Upcoming";
+  return "Available";
+};
+
+// Projects a car's availability forward day-by-day (used by the Booking
+// module's 10-day timeline). Everything it relies on (computeBookingStatus,
+// MAINTENANCE_MAX_DAYS) is the exact same logic "today" status already uses,
+// just replayed once per day instead of once for today. No new status rules
+// are introduced here — but note "Upcoming" is deliberately NOT one of this
+// projection's day statuses. computeBookingStatus only ever returns
+// "Upcoming" for a day strictly before a booking's start (i.e. a day the
+// booking does not actually occupy), so treating it as an occupied/
+// unavailable day here was the bug: it made every day between now and a
+// future booking's start look reserved. "Upcoming" remains valid everywhere
+// else (the car's overall current status, the booking table's status
+// column) — it's just not a per-day timeline state:
+//   Maintenance   → projected using the car's maintenanceStartDate + MAINTENANCE_MAX_DAYS,
+//                   the same window the auto-release effect (above) enforces
+//   Ending Today  → a booking's computeBookingStatus for that day is "Ending Today"
+//   On Rental     → a booking's computeBookingStatus for that day is "Active"
+//   Available     → none of the above (including every day before a future
+//                   booking's start — the car is genuinely free until then)
+// Exported so Booking.jsx renders from this, rather than re-deriving statuses itself.
+export const computeCarAvailabilityTimeline = (car, bookings, days = 10, fromDateStr) => {
+  const start = fromDateStr ? new Date(fromDateStr) : new Date();
+  const carBookings = bookings.filter(b => b.plate === car.plate && !b.cancelled);
+
+  // Same auto-release window the maintenance effect uses — projected forward
+  // instead of checked against "today", so future days past the release date
+  // correctly fall through to the booking-derived statuses below.
+  const maintenanceEndStr = car.status === "Maintenance" && car.maintenanceStartDate
+    ? new Date(new Date(car.maintenanceStartDate).getTime() + MAINTENANCE_MAX_DAYS * 86400000).toISOString().slice(0, 10)
+    : null;
+
+  const timeline = [];
+  for (let i = 0; i < days; i++) {
+    const dateStr = new Date(start.getTime() + i * 86400000).toISOString().slice(0, 10);
+
+    let status;
+    if (maintenanceEndStr && dateStr < maintenanceEndStr) {
+      status = "Maintenance";
+    } else {
+      const statusesOnDay = carBookings.map(b => computeBookingStatus(b, dateStr));
+      if (statusesOnDay.includes("Ending Today")) status = "Ending Today";
+      else if (statusesOnDay.includes("Active")) status = "On Rental";
+      else status = "Available"; // includes days before a future booking's start
+    }
+
+    timeline.push({ date: dateStr, status });
+  }
+  return timeline;
+};
+
+// Overlap check for double-booking prevention: two rental periods for the
+// same car clash if one starts before the other ends and ends after the
+// other starts. End date is treated as a same-day turnover (checkout in the
+// morning, new pickup that evening is allowed) — a common car-rental convention.
+const rangesOverlap = (aStart, aEnd, bStart, bEnd) => aStart < bEnd && aEnd > bStart;
+
+// Checks every non-cancelled booking for the same plate for a date clash.
+// Pass excludeBookingId when checking an edit to a booking against itself.
+// When more than one existing booking overlaps the requested range, the
+// NEAREST one (earliest start) is returned — that's the one that actually
+// determines "the last available date" the validation message below needs,
+// since it's the first thing blocking the requested range.
+const findOverlappingBooking = (bookings, plate, start, end, excludeBookingId) => {
+  if (!start || !end) return null;
+  const newStart = new Date(start).getTime();
+  const newEnd = new Date(end).getTime();
+  const conflicts = bookings.filter(b =>
+    b.plate === plate &&
+    b.id !== excludeBookingId &&
+    !b.cancelled &&
+    b.start && b.end &&
+    rangesOverlap(newStart, newEnd, new Date(b.start).getTime(), new Date(b.end).getTime())
   );
-  return isOut ? "On Rental" : "Available";
+  if (conflicts.length === 0) return null;
+  return conflicts.reduce((nearest, b) =>
+    new Date(b.start).getTime() < new Date(nearest.start).getTime() ? b : nearest
+  );
+};
+
+// Adds/subtracts whole days to a "YYYY-MM-DD" string, staying in plain
+// calendar-date land (no time-of-day/timezone drift).
+const addDaysToDateStr = (dateStr, n) =>
+  new Date(new Date(dateStr + "T00:00:00").getTime() + n * 86400000).toISOString().slice(0, 10);
+
+// Fixed en-US, no-year format ("Aug 1") so the validation message reads the
+// same regardless of the browser's locale — matches the style used in the
+// example the message is modeled on.
+const formatShortDate = (dateStr) =>
+  new Date(dateStr + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
+
+// Builds the specific, actionable conflict message for the booking form —
+// built entirely from the nearest conflicting booking findOverlappingBooking
+// already found, so this is presentation only, not a second source of truth
+// for what conflicts. Two shapes:
+//   - requested start is BEFORE the conflict's start (a partial overlap,
+//     e.g. requesting Jul 22–Aug 3 against an Aug 1–Aug 12 booking): tell
+//     the person the last date they can still book through.
+//   - requested start is ON/AFTER the conflict's start (the car is already
+//     out for the whole requested window): tell them when it frees up next.
+export const buildAvailabilityConflictMessage = (conflict, requestedStart) => {
+  const conflictStartStr = toDateStr(conflict.start);
+  const conflictEndStr = toDateStr(conflict.end);
+  const requestedStartStr = toDateStr(requestedStart);
+
+  if (requestedStartStr < conflictStartStr) {
+    const lastAvailable = addDaysToDateStr(conflictStartStr, -1);
+    return `This vehicle is available only until ${formatShortDate(lastAvailable)}. An existing booking starts on ${formatShortDate(conflictStartStr)}. Please select an end date on or before ${formatShortDate(lastAvailable)} or choose another vehicle.`;
+  }
+
+  const nextAvailable = addDaysToDateStr(conflictEndStr, 1);
+  return `This vehicle is booked from ${formatShortDate(conflictStartStr)} to ${formatShortDate(conflictEndStr)}. It will be available again from ${formatShortDate(nextAvailable)}. Please choose a different start date or another vehicle.`;
 };
 
 export const useFleetData = () => {
@@ -116,6 +261,49 @@ export const useFleetData = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookings]);
 
+  // Automatically move a car into "Maintenance" once one of its bookings'
+  // derived status becomes "Completed" (whether that's because the end date
+  // passed, or because staff force-completed it early via "Mark Done").
+  // We stamp maintenanceStartDate so the 2-day alert and 3-day auto-release
+  // below have something to count from, and flag maintenanceTriggered so this
+  // effect doesn't re-fire once maintenance has already been handled for it.
+  useEffect(() => {
+    const newlyCompleted = bookings.filter(
+      b => computeBookingStatus(b, todayStr) === "Completed" && !b.maintenanceTriggered
+    );
+    if (newlyCompleted.length === 0) return;
+
+    const platesToMaintain = new Set(newlyCompleted.map(b => b.plate));
+
+    setFleet(prev => prev.map(c =>
+      platesToMaintain.has(c.plate) ? { ...c, status: "Maintenance", maintenanceStartDate: todayStr } : c
+    ));
+    setBookings(prev => prev.map(b =>
+      newlyCompleted.some(nb => nb.id === b.id) ? { ...b, maintenanceTriggered: true } : b
+    ));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bookings]);
+
+  // A car should never sit in "Maintenance" for more than 3 days — if nobody
+  // has completed it manually by then, release it back to "Available"
+  // automatically so the fleet doesn't get silently stuck.
+  useEffect(() => {
+    const overdue = fleet.filter(c => {
+      if (c.status !== "Maintenance" || !c.maintenanceStartDate) return false;
+      const daysIn = Math.floor((new Date(todayStr) - new Date(c.maintenanceStartDate)) / 86400000);
+      return daysIn >= 3;
+    });
+    if (overdue.length === 0) return;
+
+    const platesToRelease = new Set(overdue.map(c => c.plate));
+    setFleet(prev => prev.map(c =>
+      platesToRelease.has(c.plate)
+        ? { ...c, status: "Available", maintenanceStartDate: null, maintenanceCompletedAt: todayStr, maintenanceAutoReleased: true }
+        : c
+    ));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fleet, todayStr]);
+
   // ── FLEET OPERATIONS ──────────────────────────────────────────────────────
   const addFleet = (car) => {
     const newCar = {
@@ -136,6 +324,23 @@ export const useFleetData = () => {
   const deleteFleet = (plate) => {
     setFleet(prev => prev.filter(c => c.plate !== plate));
   };
+
+  // Manual early-completion of maintenance — the one manual status change the
+  // workflow allows. If maintenance runs its full 3 days untouched, the
+  // auto-release effect above handles it instead.
+  const completeMaintenance = (plate) => {
+    setFleet(prev => prev.map(c =>
+      c.plate === plate && c.status === "Maintenance"
+        ? { ...c, status: "Available", maintenanceStartDate: null, maintenanceCompletedAt: todayStr, maintenanceAutoReleased: false }
+        : c
+    ));
+  };
+
+  // Exposed to the booking form so it can block double-bookings before
+  // calling addBooking. Returns the clashing booking, or null if the dates
+  // are free for that car. Pass excludeBookingId when validating an edit.
+  const checkBookingConflict = (plate, start, end, excludeBookingId) =>
+    findOverlappingBooking(bookings, plate, start, end, excludeBookingId);
 
   // ── BOOKING OPERATIONS ────────────────────────────────────────────────────
   const addBooking = (booking) => {
@@ -229,6 +434,24 @@ export const useFleetData = () => {
 
     const netProfit = totalEarnings - totalExpenses;
 
+    // The 6 automatic fleet/booking buckets for the dashboard — every one of
+    // these is re-derived from fleetWithStatus / bookingsWithStatus above, so
+    // they always reflect today's date with no manual bookkeeping.
+    const fleetStatusCounts = {
+      Available: fleetWithStatus.filter(c => c.status === "Available").length,
+      Upcoming: fleetWithStatus.filter(c => c.status === "Upcoming").length,
+      "On Rental": fleetWithStatus.filter(c => c.status === "On Rental").length,
+      "Ending Today": fleetWithStatus.filter(c => c.status === "Ending Today").length,
+      Maintenance: fleetWithStatus.filter(c => c.status === "Maintenance").length,
+    };
+    const bookingStatusCounts = {
+      Upcoming: bookingsWithStatus.filter(b => b.status === "Upcoming").length,
+      Active: bookingsWithStatus.filter(b => b.status === "Active").length,
+      "Ending Today": bookingsWithStatus.filter(b => b.status === "Ending Today").length,
+      Completed: bookingsWithStatus.filter(b => b.status === "Completed").length,
+      Cancelled: bookingsWithStatus.filter(b => b.status === "Cancelled").length,
+    };
+
     return {
       totalFleet,
       activeFleet,
@@ -241,6 +464,15 @@ export const useFleetData = () => {
       pendingEarnings,
       totalExpenses,
       netProfit,
+      // Dashboard's 6 required buckets:
+      availableCount: fleetStatusCounts.Available,
+      upcomingCount: fleetStatusCounts.Upcoming,
+      onRentalCount: fleetStatusCounts["On Rental"],
+      endingTodayCount: fleetStatusCounts["Ending Today"],
+      completedCount: bookingStatusCounts.Completed,
+      maintenanceCount: fleetStatusCounts.Maintenance,
+      fleetStatusCounts,
+      bookingStatusCounts,
     };
   };
 
@@ -336,7 +568,8 @@ export const useFleetData = () => {
     const today = new Date().toISOString().split("T")[0];
     let alertId = 1;
 
-    // COE expiry alerts
+    // Vehicle registration renewal alerts (car.coe holds the renewal/expiry
+    // date field name — kept for data compatibility, relabeled everywhere in the UI)
     fleet.forEach(car => {
       const coeDate = new Date(car.coe);
       const today_date = new Date(today);
@@ -348,9 +581,28 @@ export const useFleetData = () => {
           type: "coe",
           plate: car.plate,
           car: `${car.make} ${car.model}`,
-          msg: `COE expires ${car.coe}`,
+          msg: `Vehicle registration renewal due ${car.coe}`,
           days: Math.max(0, daysUntil),
           urgent: daysUntil <= 30,
+        });
+      }
+    });
+
+    // Maintenance pending alerts — a car that's been sitting in "Maintenance"
+    // for 2+ days without being completed. It will auto-release at day 3
+    // regardless (see the effect above), but this flags it before that happens.
+    fleet.forEach(car => {
+      if (car.status !== "Maintenance" || !car.maintenanceStartDate) return;
+      const daysIn = Math.floor((new Date(today) - new Date(car.maintenanceStartDate)) / (1000 * 60 * 60 * 24));
+      if (daysIn >= 2) {
+        alerts.push({
+          id: alertId++,
+          type: "maintenance",
+          plate: car.plate,
+          car: `${car.make} ${car.model}`,
+          msg: `In maintenance for ${daysIn} day${daysIn === 1 ? "" : "s"} — update or complete maintenance`,
+          days: daysIn,
+          urgent: daysIn >= 3,
         });
       }
     });
@@ -402,8 +654,8 @@ export const useFleetData = () => {
 
   return {
     // Data
-    fleet,
-    bookings,
+    fleet: fleetWithStatus,
+    bookings: bookingsWithStatus,
     earnings,
     expenses,
     alerts: generateAlerts(),
@@ -413,11 +665,13 @@ export const useFleetData = () => {
     addFleet,
     updateFleet,
     deleteFleet,
+    completeMaintenance,
 
     // Booking operations
     addBooking,
     updateBooking,
     deleteBooking,
+    checkBookingConflict,
 
     // Earnings operations
     addEarning,

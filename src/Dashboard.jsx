@@ -25,16 +25,21 @@ const Dashboard = ({ fleet, bookings, earnings, expenses, alerts, month, calcula
 
   // Monthly target is derived automatically from each car's remaining investment to recover,
   // its remaining COE runway, and its maintenance cost as of this month — not a fixed manual number.
-  // For "All Months", it's the sum of every recorded month's target so far this year.
+  // For "All Months", it's the sum of every month's target so far THIS YEAR — up to the current
+  // real-world month, not the full year (the dropdown lists Jan-Dec so future months can be
+  // previewed individually, but "YTD" must stop at today, or it double-counts months that
+  // haven't happened yet).
+  const TODAY_MONTH = "2026-06"; // keep in sync with the fixed "today" reference in theme.js
+  const ytdMonths = months.filter(m => m <= TODAY_MONTH);
   const monthlyTarget = isAllMonths
-    ? months.reduce((sum, m) => sum + calculateMonthlyTarget(m), 0)
+    ? ytdMonths.reduce((sum, m) => sum + calculateMonthlyTarget(m), 0)
     : calculateMonthlyTarget(currentMonth);
   const targetPercentage = monthlyTarget > 0 ? Math.round((monthMetrics.monthlyEarnings / monthlyTarget) * 100) : 0;
 
   // Monthly operating budget is derived automatically from each car's own maintenance %,
   // instead of a flat manual percentage of total fleet investment.
   const monthlyBudget = isAllMonths
-    ? months.reduce((sum, m) => sum + calculateMonthlyBudget(m), 0)
+    ? ytdMonths.reduce((sum, m) => sum + calculateMonthlyBudget(m), 0)
     : calculateMonthlyBudget(currentMonth);
 
   // Calculate YTD metrics

@@ -233,7 +233,7 @@ const PlReport = ({ fleet = [], bookings = [], earnings = [], expenses = [], cal
                               <div style={{ ...mono, fontSize: 12, fontWeight: 700, color: C.teal }}>{fmt(b.rate * days)}</div>
                             </div>
                             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3 }}>
-                              <div style={{ fontSize: 10.5, color: C.textMuted }}>{b.start} → {b.end} · {days} days @ ${b.rate}/d</div>
+                              <div style={{ fontSize: 10.5, color: C.textMuted }}>{b.start} → {b.end} · {days} days @ SGD {b.rate}/d</div>
                               <StatusTag status={b.status} />
                             </div>
                           </div>

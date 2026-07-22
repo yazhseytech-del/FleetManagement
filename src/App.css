@@ -1,18 +1,40 @@
-/* Scrollbar styling for a cleaner look across the app */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
+/*
+  Scrollbar styling for a cleaner look across the app.
 
-::-webkit-scrollbar-track {
-  background: transparent;
-}
+  Tailwind has no built-in utilities for ::-webkit-scrollbar, so this stays
+  as plain CSS, but it's wired into Tailwind's cascade via @layer so it
+  composes correctly with utility classes instead of fighting specificity.
 
-::-webkit-scrollbar-thumb {
-  background: #DDE4EE;
-  border-radius: 4px;
-}
+  If you'd rather do this with real Tailwind utility classes instead of raw
+  CSS, install the official plugin and drop this whole file:
 
-::-webkit-scrollbar-thumb:hover {
-  background: #8A9BB5;
+    npm install -D tailwind-scrollbar
+
+    // tailwind.config.js
+    plugins: [require('tailwind-scrollbar')],
+
+  Then apply directly on scrollable elements (or <body> for global effect):
+    className="scrollbar-thin scrollbar-thumb-[#DDE4EE] scrollbar-track-transparent
+               hover:scrollbar-thumb-[#8A9BB5]"
+
+  Keeping the @layer version below since it applies globally with zero
+  per-element classes, matching the original behavior exactly.
+*/
+@layer base {
+  ::-webkit-scrollbar {
+    @apply w-2 h-2;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply rounded;
+    background: #DDE4EE;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #8A9BB5;
+  }
 }

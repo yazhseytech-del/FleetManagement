@@ -7,7 +7,8 @@ const Alert = ({ alerts = [], fleet = [] }) => {
   const active = alerts.filter(a => !dismissed.includes(a.id));
 
   const coeAlerts = active.filter(a => a.type === "coe");
-  const operationalAlerts = active.filter(a => a.type !== "coe");
+  const maintenanceAlerts = active.filter(a => a.type === "maintenance");
+  const operationalAlerts = active.filter(a => a.type !== "coe" && a.type !== "maintenance");
 
   return (
     <div>
@@ -18,12 +19,12 @@ const Alert = ({ alerts = [], fleet = [] }) => {
         </div>
       </div>
 
-      {/* COE Alerts */}
+      {/* Registration Renewal Alerts */}
       <div style={{ marginBottom: 16 }}>
-        <SectionTitle>🔴 COE Expiry Alerts</SectionTitle>
+        <SectionTitle>🔴 Registration Renewal Alerts</SectionTitle>
         {coeAlerts.length === 0 ? (
           <Card>
-            <div style={{ padding: 24, textAlign: "center", color: C.textMuted, fontSize: 12 }}>No COE alerts</div>
+            <div style={{ padding: 24, textAlign: "center", color: C.textMuted, fontSize: 12 }}>No registration alerts</div>
           </Card>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -42,9 +43,39 @@ const Alert = ({ alerts = [], fleet = [] }) => {
                     </div>
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    <Btn small primary>Renew COE</Btn>
+                    <Btn small primary>Renew Registration</Btn>
                     <Btn small onClick={() => setDismissed([...dismissed, a.id])}>Dismiss</Btn>
                   </div>
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Maintenance Pending Alerts */}
+      <div style={{ marginBottom: 16 }}>
+        <SectionTitle>🔧 Maintenance Pending Alerts</SectionTitle>
+        {maintenanceAlerts.length === 0 ? (
+          <Card>
+            <div style={{ padding: 24, textAlign: "center", color: C.textMuted, fontSize: 12 }}>No maintenance pending alerts</div>
+          </Card>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {maintenanceAlerts.map(a => (
+              <Card key={a.id}>
+                <div style={{ padding: 16, display: "flex", alignItems: "center", gap: 14, borderLeft: `4px solid ${a.urgent ? C.red : C.amber}` }}>
+                  <div style={{ fontSize: 28 }}>🔧</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: C.navy }}>{a.plate} — {a.car}</div>
+                    <div style={{ fontSize: 11, color: C.textMuted, marginTop: 3 }}>{a.msg}</div>
+                    <div style={{ marginTop: 6 }}>
+                      <Badge color={a.urgent ? C.red : C.amber} bg={a.urgent ? C.redFaint : C.amberFaint}>
+                        {a.urgent ? "🚨 Auto-releasing soon" : "⚡ Needs attention"} — day {a.days}
+                      </Badge>
+                    </div>
+                  </div>
+                  <Btn small onClick={() => setDismissed([...dismissed, a.id])}>Dismiss</Btn>
                 </div>
               </Card>
             ))}
@@ -92,6 +123,7 @@ const Alert = ({ alerts = [], fleet = [] }) => {
               { label: "COE Expiry — Urgent Warning", val: "30 days before", channel: "In-App + Email" },
               { label: "Booking Starting Today", val: "Day of start", channel: "In-App" },
               { label: "Rental Ending Today", val: "Day of end", channel: "In-App" },
+              { label: "Maintenance Pending", val: "2 days into maintenance", channel: "In-App" },
             ].map(n => (
               <div key={n.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
                 <div>

@@ -44,11 +44,12 @@ const AddCarWizard = ({ onComplete, onClose }) => {
   const canProceedStep2 = minRate && maxRate && parseFloat(minRate) > 0 && parseFloat(maxRate) > 0 && parseFloat(minRate) <= parseFloat(maxRate);
 
   const handleGenerate = () => {
-    // theme.js's generateTargetOptions now guarantees: rate strictly rises,
-    // running days strictly falls, profit % is non-negative and non-decreasing
-    // across Conservative → Balanced → Aggressive. No client-side filtering needed.
+    // theme.js's generateTargetOptions now targets a CAGR per tier (Conservative/
+    // Balanced/Aggressive anchored around 11%), compounded over the years left to
+    // COE expiry, so it needs purchaseDate as well as coe to work out that horizon.
     const opts = generateTargetOptions({
       investment,
+      purchaseDate: car.purchaseDate,
       coe: car.coe,
       maintPct,
       minRate: parseFloat(minRate),
@@ -171,7 +172,7 @@ const AddCarWizard = ({ onComplete, onClose }) => {
           {/* STEP 3 — System Suggestions */}
           {step === 3 && options && (
             <div>
-              <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 12 }}>Pick the target that fits — a higher rate assumes fewer running days, a lower rate assumes more.</div>
+              <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 12 }}>Pick the target that fits — each tier targets a different annual return (CAGR) compounded over the car's remaining COE runway; higher-return tiers assume fewer running days per month.</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
                 {options.map(o => {
                   const isBalanced = /balanced/i.test(o.label);
@@ -190,7 +191,8 @@ const AddCarWizard = ({ onComplete, onClose }) => {
                           ⭐ Recommended
                         </div>
                       )}
-                      <div style={{ fontSize: 10, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8, marginTop: isBalanced ? 4 : 0 }}>{o.label}</div>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4, marginTop: isBalanced ? 4 : 0 }}>{o.label}</div>
+                      <div style={{ fontSize: 10, fontWeight: 600, color: C.tealLight, marginBottom: 8 }}>{o.cagr}% CAGR</div>
                       <div style={{ ...mono, fontSize: 18, fontWeight: 700, color: C.navy }}>${o.rate}</div>
                       <div style={{ fontSize: 9.5, color: C.textMuted, marginBottom: 8 }}>per day</div>
                       <div style={{ fontSize: 11, color: C.textSec, marginBottom: 3 }}>{o.runningDays} days/mo</div>
@@ -214,6 +216,9 @@ const AddCarWizard = ({ onComplete, onClose }) => {
               {[
                 ["Car", `${car.make} ${car.model} (${car.plate})`],
                 ["Total Investment", fmt(investment)],
+                ["Selected Target", chosen.label],
+                ["Target CAGR", `${chosen.cagr}%`],
+                ["Expected Monthly Income", fmt(chosen.monthlyIncome)],
                 ["Target Rate", `$${chosen.rate}/day`],
                 ["Avg Running Days", `${chosen.runningDays} days/month`],
                 ["Expected Profit", `${chosen.profitPct}%`],
