@@ -3,7 +3,7 @@ import { C, mono, fmt } from "./theme";
 import { Card, Btn, StatusTag, PlateBadge } from "./components";
 import { STATUS_PILL_COLORS, STATUS_PILL_FAINT } from "./Fleet";
 import { computeCarAvailabilityTimeline } from "./useFleetData";
-import { generateInvoicePdf } from "./invoicePdf";
+import { generateInvoicePdf } from "./Invoicepdf";
 
 
 // The statuses the 10-day timeline can show, in legend order. Colors come
