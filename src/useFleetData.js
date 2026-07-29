@@ -201,6 +201,38 @@ export const buildAvailabilityConflictMessage = (conflict, requestedStart) => {
   return `This vehicle is booked from ${formatShortDate(conflictStartStr)} to ${formatShortDate(conflictEndStr)}. It will be available again from ${formatShortDate(nextAvailable)}. Please choose a different start date or another vehicle.`;
 };
 
+// IC/ID Number → most recent past customer record with that exact IC, if any.
+// Booking history is the only "customer database" this app has (per product
+// decision — no separate customers table), so this scans `bookings` rather
+// than introducing a new data source. Matches on the normalized (uppercase,
+// alphanumeric-only) IC the same way handleICChange in FleetOpzApp.jsx
+// normalizes before calling this, so callers don't need to normalize twice.
+// Returns null (not undefined) when nothing matches, so callers can rely on
+// `match?.field` without worrying about the distinction.
+export const findCustomerByIC = (bookings, ic) => {
+  const normalized = (ic || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!normalized) return null;
+
+  // Sort newest-first (by start date) so if the same IC appears on multiple
+  // past bookings under slightly different details, the most recent one wins
+  // — that's the version of the customer's info most likely still accurate.
+  const matches = bookings
+    .filter(b => (b.ic || "").toUpperCase().replace(/[^A-Z0-9]/g, "") === normalized)
+    .sort((a, b) => new Date(b.start) - new Date(a.start));
+
+  if (matches.length === 0) return null;
+
+  const latest = matches[0];
+  return {
+    customer: latest.customer || "",
+    contact: latest.contact || "",
+    passport: latest.passport || "",
+    license: latest.license || "",
+    licenseExpiry: latest.licenseExpiry || "",
+    address: latest.address || "",
+  };
+};
+
 export const useFleetData = () => {
   const [fleet, setFleet] = useState(() => loadPersisted("fleet", INITIAL_FLEET));
   const [bookings, setBookings] = useState(() => loadPersisted("bookings", INITIAL_BOOKINGS));
@@ -344,17 +376,20 @@ export const useFleetData = () => {
 
   // ── BOOKING OPERATIONS ────────────────────────────────────────────────────
   const addBooking = (booking) => {
-    let newBooking;
-    setBookings(prev => {
-      const nextId = `BK-${String(Math.max(...prev.map(b => parseInt(b.id.slice(3))), 0) + 1).padStart(3, "0")}`;
-      newBooking = {
-        ...booking,
-        id: nextId,
-        rate: parseFloat(booking.rate),
-        status: booking.status || "Active",
-      };
-      return [...prev, newBooking];
-    });
+    // Computed from `bookings` (already in scope) rather than inside the
+    // setBookings updater — the updater only runs when React flushes the
+    // state update, which is NOT synchronous with this call. Building
+    // newBooking here means it's ready immediately for the caller to use
+    // (e.g. FleetOpzApp.jsx passes the returned booking straight into
+    // generateRentalAgreementPdf right after calling addBooking).
+    const nextId = `BK-${String(Math.max(...bookings.map(b => parseInt(b.id.slice(3))), 0) + 1).padStart(3, "0")}`;
+    const newBooking = {
+      ...booking,
+      id: nextId,
+      rate: parseFloat(booking.rate),
+      status: booking.status || "Active",
+    };
+    setBookings(prev => [...prev, newBooking]);
     return newBooking;
   };
 

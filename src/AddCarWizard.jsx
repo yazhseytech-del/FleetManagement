@@ -23,6 +23,7 @@ const emptyCar = () => ({
   otherCharges: "",
   purchaseDate: "",
   coe: "",
+ 
 });
 
 // Full onboarding flow for a new car: enter what it cost, let the system total
@@ -76,6 +77,7 @@ const AddCarWizard = ({ onComplete, onClose }) => {
       year: parseInt(car.year),
       purchaseDate: car.purchaseDate,
       coe: car.coe,
+      
       maint: DEFAULT_MAINT_PCT,
       minRate: DEFAULT_MIN_RATE,
       maxRate: DEFAULT_MAX_RATE,
@@ -119,13 +121,14 @@ const AddCarWizard = ({ onComplete, onClose }) => {
                 <Input label="Model" value={car.model} onChange={e => setField("model", e.target.value)} placeholder="e.g., Corolla" />
               </div>
               <Input label="Colour" value={car.color} onChange={e => setField("color", e.target.value)} placeholder="e.g., Silver" />
+              
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <Input label="Purchase Price ($)" type="number" value={car.purchase} onChange={e => setField("purchase", e.target.value)} placeholder="e.g., 26000" />
-                <Input label="Insurance ($)" type="number" value={car.insurance} onChange={e => setField("insurance", e.target.value)} placeholder="e.g., 1200" />
+                <Input label="Purchase Price (SGD)" type="number" value={car.purchase} onChange={e => setField("purchase", e.target.value)} placeholder="e.g., 26000" />
+                <Input label="Insurance (SGD)" type="number" value={car.insurance} onChange={e => setField("insurance", e.target.value)} placeholder="e.g., 1200" />
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <Input label="Registration ($)" type="number" value={car.reg} onChange={e => setField("reg", e.target.value)} placeholder="e.g., 1300" />
-                <Input label="Other Charges ($)" type="number" value={car.otherCharges} onChange={e => setField("otherCharges", e.target.value)} placeholder="e.g., 200" />
+                <Input label="Registration (SGD)" type="number" value={car.reg} onChange={e => setField("reg", e.target.value)} placeholder="e.g., 1300" />
+                <Input label="Other Charges (SGD)" type="number" value={car.otherCharges} onChange={e => setField("otherCharges", e.target.value)} placeholder="e.g., 200" />
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                 <Input label="Purchase Date" type="date" value={car.purchaseDate} onChange={e => setField("purchaseDate", e.target.value)} />
@@ -180,7 +183,7 @@ const AddCarWizard = ({ onComplete, onClose }) => {
                       )}
                       <div style={{ fontSize: 10, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4, marginTop: isBalanced ? 4 : 0 }}>{o.label}</div>
                       <div style={{ fontSize: 10, fontWeight: 600, color: C.tealLight, marginBottom: 8 }}>{o.cagr}% CAGR</div>
-                      <div style={{ ...mono, fontSize: 18, fontWeight: 700, color: C.navy }}>${o.rate}</div>
+                      <div style={{ ...mono, fontSize: 18, fontWeight: 700, color: C.navy }}>SGD {o.rate}</div>
                       <div style={{ fontSize: 9.5, color: C.textMuted, marginBottom: 8 }}>per day</div>
                       <div style={{ fontSize: 11, color: C.textSec, marginBottom: 3 }}>{o.runningDays} days/mo</div>
                       <div style={{ fontSize: 9.5, color: C.textMuted, marginTop: 6 }}>Target Monthly Income</div>
@@ -206,7 +209,7 @@ const AddCarWizard = ({ onComplete, onClose }) => {
                 ["Selected Target", chosen.label],
                 ["Target CAGR", `${chosen.cagr}%`],
                 ["Expected Monthly Income", fmt(chosen.monthlyIncome)],
-                ["Target Rate", `$${chosen.rate}/day`],
+                ["Target Rate", `SGD ${chosen.rate}/day`],
                 ["Avg Running Days", `${chosen.runningDays} days/month`],
                 ["Expected Profit", `${chosen.profitPct}%`],
               ].map(([l, v]) => (

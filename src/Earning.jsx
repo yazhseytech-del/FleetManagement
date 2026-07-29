@@ -98,7 +98,7 @@ const Earning = ({ earnings = [], fleet = [], bookings = [], onAddEarning, onUpd
                 <td style={{ padding: "11px 12px", fontSize: 12, fontWeight: 600 }}>{e.customer}</td>
                 <td style={{ padding: "11px 12px", fontSize: 11, color: C.textSec, whiteSpace: "nowrap" }}>{e.start} → {e.end}</td>
                 <td style={{ padding: "11px 12px", ...mono, fontSize: 11, textAlign: "center" }}>{e.days}</td>
-                <td style={{ padding: "11px 12px", ...mono, fontSize: 11 }}>${e.rate}/d</td>
+                <td style={{ padding: "11px 12px", ...mono, fontSize: 11 }}>SGD {e.rate}/d</td>
                 <td style={{ padding: "11px 12px", ...mono, fontSize: 13, fontWeight: 700, color: C.green }}>{fmt(e.total)}</td>
                 <td style={{ padding: "11px 12px" }}>
                   {e.locked

@@ -3,6 +3,7 @@ import { C, mono, fmt, totalInv, daysUntil, generateTargetOptions } from "./them
 import { Card, CardHeader, Btn, StatusTag, PlateBadge, SectionTitle } from "./components";
 import AddCarWizard from "./AddCarWizard";
 
+
 // ─────────────────────────────────────────────────────────────────────────
 // Expense taxonomy — shared between the Add Expense form and Expense History
 // ─────────────────────────────────────────────────────────────────────────
@@ -153,7 +154,7 @@ const ExpenseDrawer = ({ car, onAddExpense, onClose }) => {
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
             <div>
-              <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Amount (AED)</div>
+              <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Amount (SGD)</div>
               <input type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)}
                 placeholder="0.00" style={{ ...fieldStyle, fontFamily: mono.fontFamily }} />
             </div>
@@ -626,7 +627,7 @@ const Fleet = ({ fleet = [], onAddFleet, onUpdateCar, onDeleteCar, onCompleteMai
                 { label: "Make / Model", field: null },
                 { label: "Year", field: null },
                 { label: "Colour", field: null },
-                { label: "Investment (AED)", field: null },
+                { label: "Investment (SGD)", field: null },
                 { label: "Purchase Date", field: "purchaseDate" },
                 { label: "Reg. Expiry", field: "coe" },
                 { label: "Maint %", field: null },

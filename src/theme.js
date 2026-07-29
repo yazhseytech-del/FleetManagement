@@ -36,20 +36,21 @@ bg:          "#EAEAEA",   // bright studio silver-grey (replaces #eee7f7d1)
 export const mono = { fontFamily: "'JetBrains Mono', 'Courier New', monospace" };
 
 // ── HELPERS ──────────────────────────────────────────────────────────────────
-// Currency switched from SGD to AED — this app now targets the Dubai/UAE rental market.
-export const fmt = (n) => `AED ${n.toLocaleString()}`;
+export const fmt = (n) => `SGD ${n.toLocaleString()}`;
 export const totalInv = (c) => c.purchase + c.insurance + c.reg + (c.otherCharges || 0);
 // NOTE: `coe` (a car's registration/ownership-renewal expiry date) is a Singapore-era field
 // name kept as-is for data compatibility with existing fleet records. Every user-facing
 // label has been renamed to "Registration Expiry" — see Fleet.jsx / Alert.jsx.
 export const daysUntil = (d) => Math.ceil((new Date(d) - new Date("2026-06-27")) / 86400000);
 
-// ── DUBAI MARKET DAILY RATE BANDS (AED/day) ─────────────────────────────────
+// ── DAILY RATE BANDS (SGD/day) ──────────────────────────────────────────────
 // Reference ranges so daily rates can be set sensibly per vehicle category
-// instead of being an arbitrary number. Pulled from typical Dubai rental
-// market positioning (economy/compact through luxury/exotic). Used as
-// suggested min/max guardrails wherever a target or booking rate is entered.
-export const DUBAI_RATE_BANDS = [
+// instead of being an arbitrary number. Used as suggested min/max guardrails
+// wherever a target or booking rate is entered.
+// NOTE: these min/max figures were originally tuned for AED/Dubai pricing and
+// haven't been re-checked against SGD/Singapore market rates — treat them as
+// placeholders to revisit, not verified numbers.
+export const RATE_BANDS = [
   { category: "Economy",     min: 90,  max: 150 },
   { category: "Compact/Sedan", min: 130, max: 220 },
   { category: "SUV",         min: 220, max: 450 },
@@ -57,12 +58,12 @@ export const DUBAI_RATE_BANDS = [
   { category: "Exotic/Sports", min: 1200, max: 4000 },
 ];
 
-// Suggests a Dubai-market category (and its AED/day band) from a car's target
+// Suggests a market category (and its SGD/day band) from a car's target
 // or asking rate, so the UI can flag "this looks low/high for its class".
 export const suggestRateBand = (dailyRate) => {
   const rate = Number(dailyRate) || 0;
-  return DUBAI_RATE_BANDS.find(b => rate >= b.min && rate <= b.max)
-    || (rate > 0 ? DUBAI_RATE_BANDS[DUBAI_RATE_BANDS.length - 1] : DUBAI_RATE_BANDS[0]);
+  return RATE_BANDS.find(b => rate >= b.min && rate <= b.max)
+    || (rate > 0 ? RATE_BANDS[RATE_BANDS.length - 1] : RATE_BANDS[0]);
 };
 
 // ── TARGET RATE SUGGESTIONS (3-tier) ────────────────────────────────────────
