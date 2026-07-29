@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { C } from "./theme";
-import { Btn, Badge, Modal, Input, Select } from "./components";
+import { Btn, Badge, Modal, Input, Select, StatusTag } from "./components";
 import { useFleetData, buildAvailabilityConflictMessage, findCustomerByIC, computeCarAvailabilityTimeline } from "./useFleetData";
 
 import AddCarWizard from "./AddCarWizard";
-import { generateRentalAgreementPdf } from "./rentalAgreement";
+import { generateRentalAgreementPdf } from "./rentalagreement";
 
 import Dashboard from "./Dashboard";
 import Fleet from "./Fleet";
@@ -396,10 +396,7 @@ export default function FleetOpzApp() {
     setBookingStep(3);
   };
 
-  // Currency for the New Booking wizard's pricing step is SGD, independent
-  // of the "AED"-labeled fmt() used elsewhere in the app (Earnings, P&L,
-  // rental agreement PDF, etc.) — those live in files outside this task's
-  // scope, so only this wizard's own pricing display uses SGD for now.
+  // Currency for the New Booking wizard's pricing step is SGD.
   const formatSGD = (n) => `SGD ${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   // Set only once handleNewBookingSubmit succeeds (holds the created booking
@@ -898,7 +895,7 @@ export default function FleetOpzApp() {
                   </div>
 
                 
-                
+
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
                     <div>
                       <label style={bookingFieldLabelStyle}>Driving License Number</label>
@@ -907,7 +904,7 @@ export default function FleetOpzApp() {
                         value={newBookingData.license}
                         readOnly={!!matchedCustomer}
                         onChange={(e) => !matchedCustomer && setNewBookingData({ ...newBookingData, license: e.target.value.toUpperCase() })}
-                        placeholder=" DL-2024-88213"
+                        placeholder="DL-2024-88213"
                         style={bookingFieldInputStyle(!!matchedCustomer)}
                       />
                       {newBookingData.license && restrictedLicenses.some(
@@ -963,6 +960,20 @@ export default function FleetOpzApp() {
                         : [{ value: "", label: "No cars in fleet" }]
                     }
                   />
+
+                  {/* Derived directly from fleetData.fleet + the currently selected
+                      plate on every render (no separate state to fall out of sync) —
+                      so it always reflects the live status and swaps instantly when
+                      a different car is picked. */}
+                  {newBookingData.plate && (() => {
+                    const car = fleetData.fleet.find(c => c.plate === newBookingData.plate);
+                    return car ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "-8px 0 16px" }}>
+                        <span style={{ fontSize: 11, color: C.textMuted }}>Current Status:</span>
+                        <StatusTag status={car.status} />
+                      </div>
+                    ) : null;
+                  })()}
 
                   <div style={{ fontSize: 13, fontWeight: 700, color: C.navy, margin: "18px 0 14px" }}>📅 Rental Period</div>
 
@@ -1044,13 +1055,13 @@ export default function FleetOpzApp() {
                       label="Pickup Location"
                       value={newBookingData.pickup}
                       onChange={(e) => setNewBookingData({ ...newBookingData, pickup: e.target.value })}
-                      placeholder="e.g., Dubai Marina"
+                      placeholder="Dubai Marina"
                     />
                     <Input
                       label="Drop Location"
                       value={newBookingData.drop}
                       onChange={(e) => setNewBookingData({ ...newBookingData, drop: e.target.value })}
-                      placeholder="e.g., Downtown Dubai"
+                      placeholder="Downtown Dubai"
                     />
                   </div>
 
@@ -1067,7 +1078,7 @@ export default function FleetOpzApp() {
                           if (v !== "" && Number(v) < 0) return;
                           setNewBookingData({ ...newBookingData, mileageOut: v });
                         }}
-                        placeholder="e.g., 9210"
+                        placeholder="9210"
                         style={bookingFieldInputStyle(false)}
                       />
                     </div>
