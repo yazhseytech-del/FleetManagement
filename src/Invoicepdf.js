@@ -108,8 +108,19 @@ export const generateInvoicePdf = (booking, car, inv) => {
   doc.setFontSize(8.5);
   doc.setTextColor(...slate);
   let ay = y + 5.5;
-  doc.text(`${COMPANY_INFO.legalName}, ${COMPANY_INFO.addressLines[0]}`, textX, ay); ay += 4;
-  doc.text(COMPANY_INFO.addressLines[1], textX, ay); ay += 4;
+
+  // First address line is merged with the legal name on one line.
+  doc.text(`${COMPANY_INFO.legalName}, ${COMPANY_INFO.addressLines[0]}`, textX, ay);
+  ay += 4;
+
+  // Any additional address lines (index 1+) render automatically here.
+  // Previously this hardcoded `addressLines[1]`, which crashed jsPDF
+  // whenever the array had only one entry (doc.text(undefined, ...)).
+  COMPANY_INFO.addressLines.slice(1).forEach((line) => {
+    doc.text(line, textX, ay);
+    ay += 4;
+  });
+
   doc.text(`UEN: ${COMPANY_INFO.uen}`, textX, ay); ay += 4;
   doc.setTextColor(...blue);
   doc.text(`Email: ${COMPANY_INFO.email}`, textX, ay); ay += 4;
