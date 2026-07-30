@@ -12,14 +12,14 @@ import { jsPDF } from "jspdf";
 // details, not read from booking data. Update to match your business before
 // shipping; nothing else in this file needs to change.
 const COMPANY_INFO = {
-  name: "RDK TRADING PTD LTD",
-  legalName: "RDK Trading Pte. Ltd.",
-  addressLines: ["81 UBI Avenue 4, #11-22 UB. HBE,", "Singapore 408830"],
-  uen: "202416072K",
-  email: "RDKtrading1995@gmail.com",
-  phone: "84605545",
-  bank: "DBS Current: 0721375478",
-  paynow: "PayNow UEN: 202416072K",
+  name: "ABC Enterprises Pte. Ltd",
+  legalName: "ABC Enterprises Pte. Ltd.",
+  addressLines: ["1 Marine Parade Central, #07-02 Parkway Centre, Singapore 449408"],
+  uen: "2022298",
+  email: "ABCRental@gmail.com",
+  phone: "94832832",
+  bank: "DBS Current: 026712387",
+  paynow: "PayNow UEN: 202523871",
 };
 
 const pad2 = (n) => String(n).padStart(2, "0");
