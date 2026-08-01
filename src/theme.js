@@ -6,26 +6,31 @@
 // and a material flat-lay (slate-teal glass, charcoal, teal-green, greige,
 // cream, eucalyptus, and matte black). Every key name below is unchanged from
 // before — only the values moved — so nothing downstream needs to change.
+// Values below are a uniform pass slightly darker than the original palette
+// (~5-15% per channel depending on how light/mid-tone the color already was)
+// for better on-screen visibility/contrast, while keeping each color's hue
+// and relative relationships the same — same "coastal atelier" direction,
+// just a touch deeper across the board. Key names unchanged.
 export const C = {
-  navy:        "#172c30",   // deep slate-teal — primary structural dark
-  navyMid:     "#1f3d45",   // charcoal-teal — secondary structural dark
+  navy:        "#15282B",   // deep slate-teal — primary structural dark
+  navyMid:     "#1C373E",   // charcoal-teal — secondary structural dark
   black:       "#0A0E0F",   // true near-black — reserved for high-emphasis accents only (see usage note below)
-  teal:        "#2F7A72",   // moodboard teal-green — primary brand color
-  tealLight:   "#7FA6AC",   // dusty sea-blue — secondary teal
-  tealFaint:   "#E6EEEC",   // pale sea-foam wash
-  amber:       "#B9905A",   // warm clay/sand — replaces the old bright orange-amber
-  amberFaint:  "#F5EDE2",   // warm sand wash
-  red:         "#A85A4C",   // muted brick/terracotta — never neon
-  redFaint:    "#F6E7E3",   // pale blush wash
-  green:       "#7C9473",   // sage — success, more organic than the old bright green
-  greenFaint:  "#EAF0E4",   // pale sage wash
-bg:          "#EAEAEA",   // bright studio silver-grey (replaces #eee7f7d1)
-  surface:     "#FFFEFB",   // warm white card surface (pops beautifully against the studio grey)
-  border:      "#DEDACE",   // soft warm border
-  linen:       "#F2E9E4",   // soft warm border
+  teal:        "#296A63",   // moodboard teal-green — primary brand color
+  tealLight:   "#6C8D92",   // dusty sea-blue — secondary teal
+  tealFaint:   "#D6DDDB",   // pale sea-foam wash
+  amber:       "#9D7A4C",   // warm clay/sand — replaces the old bright orange-amber
+  amberFaint:  "#E4DCD2",   // warm sand wash
+  red:         "#8F4C41",   // muted brick/terracotta — never neon
+  redFaint:    "#E5D7D3",   // pale blush wash
+  green:       "#6C8164",   // sage — success, more organic than the old bright green
+  greenFaint:  "#DADFD4",   // pale sage wash
+  bg:          "#D3D3D3",   // bright studio silver-grey (replaces #eee7f7d1)
+  surface:     "#F7F6F3",   // warm white card surface (pops beautifully against the studio grey)
+  border:      "#C3C0B5",   // soft warm border
+  linen:       "#E1D9D4",   // soft warm border
   textPri:     "#12181A",   // dark charcoal — primary reading text (darkened from #1E2A2C)
-  textSec:     "#3F4B4F",   // darker slate text (darkened from #57666B)
-  textMuted:   "#726E64",   // darker warm grey text (darkened from #98948A)
+  textSec:     "#3A4549",   // darker slate text (darkened from #57666B)
+  textMuted:   "#67635A",   // darker warm grey text (darkened from #98948A)
 };
 
 // C.black is intentionally not wired into every component — it's the one
@@ -38,10 +43,16 @@ export const mono = { fontFamily: "'JetBrains Mono', 'Courier New', monospace" }
 // ── HELPERS ──────────────────────────────────────────────────────────────────
 export const fmt = (n) => `SGD ${n.toLocaleString()}`;
 export const totalInv = (c) => c.purchase + c.insurance + c.reg + (c.otherCharges || 0);
+// Single source of truth for "today" across every date-driven calculation in
+// the app (COE/compliance countdowns here, and the target-option horizon in
+// generateTargetOptions below). Everything reads this instead of the real
+// device clock, so a demo run today and one run next month agree on the same
+// "today" and never silently drift apart.
+const APP_NOW = new Date("2026-06-27");
 // NOTE: `coe` (a car's registration/ownership-renewal expiry date) is a Singapore-era field
 // name kept as-is for data compatibility with existing fleet records. Every user-facing
 // label has been renamed to "Registration Expiry" — see Fleet.jsx / Alert.jsx.
-export const daysUntil = (d) => Math.ceil((new Date(d) - new Date("2026-06-27")) / 86400000);
+export const daysUntil = (d) => Math.ceil((new Date(d) - APP_NOW) / 86400000);
 
 // ── DAILY RATE BANDS (SGD/day) ──────────────────────────────────────────────
 // Reference ranges so daily rates can be set sensibly per vehicle category
@@ -94,8 +105,10 @@ const MS_PER_DAY = 1000 * 60 * 60 * 24;
 
 // investment: purchase + insurance + registration + other charges (maintenance
 //             is folded in below, via maintPct).
-// purchaseDate / coe: date strings. purchaseDate falls back to today if missing
-//             so older records without one still generate options.
+// purchaseDate / coe: date strings. purchaseDate falls back to the app's fixed
+//             "today" (APP_NOW) if missing, so older records without one still
+//             generate options — and so the horizon doesn't silently change
+//             depending on when the app happens to be run in real life.
 // minRate / maxRate: no longer drive the math directly — rate is now purely a
 //             function of the CAGR/FV formula above. Kept in the signature in
 //             case you want to flag "this lands outside your stated band".
@@ -103,7 +116,7 @@ export const generateTargetOptions = ({ investment, purchaseDate, coe, maintPct,
   const maintenanceCost = investment * ((maintPct || 0) / 100);
   const totalInvestment = investment + maintenanceCost;
 
-  const start = purchaseDate ? new Date(purchaseDate) : new Date();
+  const start = purchaseDate ? new Date(purchaseDate) : APP_NOW;
   const end = new Date(coe);
   const rawDays = (end - start) / MS_PER_DAY;
   // Guard against a missing/past COE date collapsing the horizon to zero or negative.

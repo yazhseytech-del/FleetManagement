@@ -1,17 +1,13 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { C, mono, fmt, totalInv, daysUntil, generateTargetOptions } from "./theme";
 import { Card, CardHeader, Btn, StatusTag, PlateBadge, SectionTitle } from "./components";
 import AddCarWizard from "./AddCarWizard";
 
 
 // ─────────────────────────────────────────────────────────────────────────
-// Expense taxonomy — shared between the Add Expense form and Expense History
+// Expense taxonomy — shared between the Add Vehicle Expense form and Expense History
 // ─────────────────────────────────────────────────────────────────────────
 const EXPENSE_CATEGORIES = ["Repair", "Insurance", "Road Tax", "Fuel", "Cleaning", "Parking", "Tyres", "Accessories", "Other"];
-// Maintenance Budget is auto-derived from these three "wear & upkeep" categories only —
-// everything else (Insurance, Road Tax, Fuel, Cleaning, Parking, Other) still counts
-// toward Total Expenses but not toward the Maintenance Budget figure.
-const MAINTENANCE_CATEGORIES = ["Repair", "Tyres", "Accessories"];
 
 const CATEGORY_META = {
   Repair: { icon: "🔧", color: C.red },
@@ -63,14 +59,14 @@ function computeCarFinancials(car, bookings, expenses) {
   const carExpenses = expenses
     .filter((e) => e.plate === car.plate)
     .sort((a, b) => (parseDateSafe(b.date) || 0) - (parseDateSafe(a.date) || 0));
- const maintenanceBudget = carExpenses.reduce(
+ const vehicleExpense = carExpenses.reduce(
   (sum, e) => sum + (Number(e.amount) || 0),
   0
 );
- const netProfit = bookingRevenue - maintenanceBudget;
+ const netProfit = bookingRevenue - vehicleExpense;
  const roi = inv > 0 ? (netProfit / inv) * 100 : 0;
 
-  return { inv, bookingRevenue, totalBookings, rentalDays,  maintenanceBudget, netProfit, roi, carExpenses };
+  return { inv, bookingRevenue, totalBookings, rentalDays,  vehicleExpense, netProfit, roi, carExpenses };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -96,6 +92,41 @@ const CompactRow = ({ label, value, valueColor, bold, useMono = true }) => (
     </span>
   </div>
 );
+
+// Status derived from days-remaining for any compliance/validity date —
+// shared between this view and the Add New Car wizard's Compliance step so
+// "Expiring" / "Expired" never mean different things in the two places.
+const complianceStatus = (days) => {
+  if (days == null || isNaN(days)) return { label: "—", color: C.textMuted };
+  if (days < 0) return { label: "Expired", color: C.red };
+  if (days <= 30) return { label: "Expiring Soon", color: C.red };
+  if (days <= 90) return { label: "Expiring", color: C.amber };
+  return { label: "Active", color: C.green };
+};
+
+// Read-only row for a single compliance/validity date — shows the date plus
+// an auto-computed days-remaining / status readout underneath, matching the
+// wizard's Compliance step.
+const ComplianceRow = ({ label, date }) => {
+  const days = date ? daysUntil(date) : null;
+  const st = complianceStatus(days);
+  return (
+    <div style={{
+      display: "flex", justifyContent: "space-between", alignItems: "center",
+      padding: "8px 0", borderBottom: `1px solid ${C.border}`, fontSize: 12,
+    }}>
+      <span style={{ color: C.textMuted, fontWeight: 500, fontSize: 11 }}>{label}</span>
+      <div style={{ textAlign: "right" }}>
+        <div style={{ ...mono, fontWeight: 600, fontSize: 12 }}>{date || "—"}</div>
+        {date && (
+          <div style={{ fontSize: 9.5, fontWeight: 700, color: st.color }}>
+            {st.label}{days != null ? ` · ${days >= 0 ? `${days}d left` : `${Math.abs(days)}d overdue`}` : ""}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
 
 // Right-side slide-over drawer for logging a new expense. Rendered via a fixed
 // backdrop + panel so opening/closing it never navigates away from the details page.
@@ -134,7 +165,7 @@ const ExpenseDrawer = ({ car, onAddExpense, onClose }) => {
         overflow: "hidden",
       }}>
         <div style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: `1px solid ${C.border}` }}>
-          <div style={{ fontSize: 13.5, fontWeight: 700, color: C.navy }}>Add Expense</div>
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: C.navy }}>Add Vehicle Expense</div>
           <button onClick={onClose} aria-label="Close" style={{ background: "none", border: "none", fontSize: 14, color: C.textMuted, cursor: "pointer", lineHeight: 1, padding: 4 }}>✕</button>
         </div>
 
@@ -176,16 +207,95 @@ const ExpenseDrawer = ({ car, onAddExpense, onClose }) => {
 // ─────────────────────────────────────────────────────────────────────────
 // Compact Vehicle Details Modal — overlays on top of Fleet list
 // ─────────────────────────────────────────────────────────────────────────
-const VehicleDetailsModal = ({ car, bookings, expenses, onAddExpense, onUpdateCar, onCompleteMaintenance, onDelete, onClose }) => {
+const VehicleDetailsModal = ({ car, bookings, expenses, onAddExpense, onUpdateCar, onDelete, onClose, startEditing = false }) => {
   const fin = useMemo(() => computeCarFinancials(car, bookings, expenses), [car, bookings, expenses]);
   const d = daysUntil(car.coe);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // Edit mode — toggled by the "Edit" button below, or entered immediately
+  // when opened via the table's "Edit" link (startEditing). `editForm` holds
+  // a draft copy of the editable fields; nothing is written back to the
+  // fleet via onUpdateCar until Save is pressed, so Cancel always discards cleanly.
+  const [editing, setEditing] = useState(false);
+  const [editForm, setEditForm] = useState(null);
+  const [editError, setEditError] = useState("");
   const recoveryPct = fin.inv > 0 ? Math.min((fin.bookingRevenue / fin.inv) * 100, 100) : 0;
   const profitColor = fin.netProfit > 0 ? C.green : fin.netProfit < 0 ? C.red : C.amber;
-  const inMaintenance = car.status === "Maintenance";
-  const maintDaysIn = inMaintenance && car.maintenanceStartDate
-    ? Math.floor((new Date() - new Date(car.maintenanceStartDate)) / 86400000)
-    : null;
+
+  const handleStartEdit = () => {
+    setEditForm({
+      make: car.make || "",
+      model: car.model || "",
+      year: car.year ?? "",
+      color: car.color || "",
+      fuelType: car.fuelType || "Petrol",
+      transmission: car.transmission || "Automatic",
+      purchase: car.purchase ?? 0,
+      insurance: car.insurance ?? 0,
+      reg: car.reg ?? 0,
+      otherCharges: car.otherCharges ?? 0,
+      coe: car.coe || "",
+      insuranceExpiry: car.insuranceExpiry || "",
+      ltaTransferDate: car.ltaTransferDate || "",
+      roadTaxExpiry: car.roadTaxExpiry || "",
+      inspectionExpiry: car.inspectionExpiry || "",
+      targetRate: car.targetRate ?? "",
+      runningDaysTarget: car.runningDaysTarget ?? "",
+      profitPctTarget: car.profitPctTarget ?? "",
+    });
+    setEditError("");
+    setEditing(true);
+  };
+
+  const handleCancelEdit = () => {
+    setEditing(false);
+    setEditForm(null);
+    setEditError("");
+  };
+
+  // Opened via the Fleet table's "Edit" link (as opposed to "Details →") —
+  // jump straight into edit mode instead of making the user click Edit again.
+  useEffect(() => {
+    if (startEditing) handleStartEdit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleSaveEdit = () => {
+    if (!editForm.make.trim() || !editForm.model.trim()) {
+      setEditError("Make and Model can't be empty.");
+      return;
+    }
+    if (!editForm.year || Number(editForm.year) <= 0) {
+      setEditError("Enter a valid Year.");
+      return;
+    }
+    if (typeof onUpdateCar !== "function") {
+      setEditError("Saving isn't wired up yet.");
+      return;
+    }
+    onUpdateCar(car.plate, {
+      make: editForm.make.trim(),
+      model: editForm.model.trim(),
+      year: Number(editForm.year),
+      color: editForm.color.trim(),
+      fuelType: editForm.fuelType,
+      transmission: editForm.transmission,
+      purchase: Number(editForm.purchase) || 0,
+      insurance: Number(editForm.insurance) || 0,
+      reg: Number(editForm.reg) || 0,
+      otherCharges: Number(editForm.otherCharges) || 0,
+      coe: editForm.coe,
+      insuranceExpiry: editForm.insuranceExpiry,
+      ltaTransferDate: editForm.ltaTransferDate,
+      roadTaxExpiry: editForm.roadTaxExpiry,
+      inspectionExpiry: editForm.inspectionExpiry,
+      targetRate: editForm.targetRate === "" ? car.targetRate : Number(editForm.targetRate),
+      runningDaysTarget: editForm.runningDaysTarget === "" ? car.runningDaysTarget : Number(editForm.runningDaysTarget),
+      profitPctTarget: editForm.profitPctTarget === "" ? car.profitPctTarget : Number(editForm.profitPctTarget),
+    });
+    setEditing(false);
+    setEditForm(null);
+    setEditError("");
+  };
 
   return (
     <>
@@ -220,42 +330,157 @@ const VehicleDetailsModal = ({ car, bookings, expenses, onAddExpense, onUpdateCa
           {/* Status & Registration Alert */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${C.border}` }}>
             <StatusTag status={toFleetPageStatus(car.status)} />
-            {inMaintenance ? (
-              <div style={{
-                fontSize: 10.5, fontWeight: 600, padding: "6px 10px", borderRadius: 8,
-                background: maintDaysIn >= 2 ? C.redFaint : C.amberFaint,
-                color: maintDaysIn >= 2 ? C.red : C.amber,
-              }}>
-                🔧 Day {maintDaysIn + 1} of 3 in maintenance{maintDaysIn >= 2 ? " — auto-release soon" : ""}
-              </div>
-            ) : (
-              <div style={{
-                fontSize: 10.5, fontWeight: 600, padding: "6px 10px", borderRadius: 8,
-                background: d < 30 ? C.redFaint : d < 90 ? C.amberFaint : C.greenFaint,
-                color: d < 30 ? C.red : d < 90 ? C.amber : C.green,
-              }}>
-                {d < 30 ? "⚠" : d < 90 ? "⚡" : "✓"} Reg. Expiry: {car.coe}
-              </div>
-            )}
+            <div style={{
+              fontSize: 10.5, fontWeight: 600, padding: "6px 10px", borderRadius: 8,
+              background: d < 30 ? C.redFaint : d < 90 ? C.amberFaint : C.greenFaint,
+              color: d < 30 ? C.red : d < 90 ? C.amber : C.green,
+            }}>
+              {d < 30 ? "⚠" : d < 90 ? "⚡" : "✓"} Reg. Expiry: {car.coe}
+            </div>
           </div>
 
           {/* Vehicle Details */}
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: C.navy, textTransform: "uppercase", marginBottom: 8 }}>Vehicle</div>
-            <CompactRow label="Make" value={car.make} useMono={false} />
-            <CompactRow label="Model" value={car.model} useMono={false} />
-            <CompactRow label="Year" value={car.year} useMono={false} />
-            <CompactRow label="Colour" value={car.color} useMono={false} />
+            {editing ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Make</div>
+                  <input type="text" value={editForm.make} onChange={(e) => setEditForm({ ...editForm, make: e.target.value })} style={fieldStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Model</div>
+                  <input type="text" value={editForm.model} onChange={(e) => setEditForm({ ...editForm, model: e.target.value })} style={fieldStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Year</div>
+                  <input type="number" value={editForm.year} onChange={(e) => setEditForm({ ...editForm, year: e.target.value })} style={fieldStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Colour</div>
+                  <input type="text" value={editForm.color} onChange={(e) => setEditForm({ ...editForm, color: e.target.value })} style={fieldStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Fuel Type</div>
+                  <select value={editForm.fuelType} onChange={(e) => setEditForm({ ...editForm, fuelType: e.target.value })} style={{ ...fieldStyle, cursor: "pointer" }}>
+                    <option value="Petrol">Petrol</option>
+                    <option value="Diesel">Diesel</option>
+                  </select>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Transmission</div>
+                  <select value={editForm.transmission} onChange={(e) => setEditForm({ ...editForm, transmission: e.target.value })} style={{ ...fieldStyle, cursor: "pointer" }}>
+                    <option value="Automatic">Automatic</option>
+                    <option value="Manual">Manual</option>
+                  </select>
+                </div>
+              </div>
+            ) : (
+              <>
+                <CompactRow label="Make" value={car.make} useMono={false} />
+                <CompactRow label="Model" value={car.model} useMono={false} />
+                <CompactRow label="Year" value={car.year} useMono={false} />
+                <CompactRow label="Colour" value={car.color} useMono={false} />
+                <CompactRow label="Fuel Type" value={car.fuelType || "—"} useMono={false} />
+                <CompactRow label="Transmission" value={car.transmission || "—"} useMono={false} />
+              </>
+            )}
+          </div>
+
+          {/* Compliance & Validity */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: C.navy, textTransform: "uppercase", marginBottom: 8 }}>Compliance & Validity</div>
+            {editing ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Insurance Expiry</div>
+                  <input type="date" value={editForm.insuranceExpiry} onChange={(e) => setEditForm({ ...editForm, insuranceExpiry: e.target.value })} style={fieldStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>LTA Transfer Validity</div>
+                  <input type="date" value={editForm.ltaTransferDate} onChange={(e) => setEditForm({ ...editForm, ltaTransferDate: e.target.value })} style={fieldStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Road Tax Expiry</div>
+                  <input type="date" value={editForm.roadTaxExpiry} onChange={(e) => setEditForm({ ...editForm, roadTaxExpiry: e.target.value })} style={fieldStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Inspection Due</div>
+                  <input type="date" value={editForm.inspectionExpiry} onChange={(e) => setEditForm({ ...editForm, inspectionExpiry: e.target.value })} style={fieldStyle} />
+                </div>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>COE Expiry</div>
+                  <input type="date" value={editForm.coe} onChange={(e) => setEditForm({ ...editForm, coe: e.target.value })} style={fieldStyle} />
+                </div>
+              </div>
+            ) : (
+              <>
+                <ComplianceRow label="Insurance Expiry" date={car.insuranceExpiry} />
+                <ComplianceRow label="LTA Transfer Validity" date={car.ltaTransferDate} />
+                <ComplianceRow label="Road Tax Expiry" date={car.roadTaxExpiry} />
+                <ComplianceRow label="Inspection Due" date={car.inspectionExpiry} />
+              </>
+            )}
           </div>
 
           {/* Investment */}
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: C.navy, textTransform: "uppercase", marginBottom: 8 }}>Investment</div>
-            <CompactRow label="Purchase" value={fmt(car.purchase)} />
-            <CompactRow label="Insurance" value={fmt(car.insurance)} />
-            <CompactRow label="Registration" value={fmt(car.reg)} />
-            <CompactRow label="Other Charges" value={fmt(car.otherCharges || 0)} />
-            <CompactRow label="Total" value={fmt(fin.inv)} valueColor={C.green} bold />
+            {editing ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Purchase (SGD)</div>
+                  <input type="number" min="0" value={editForm.purchase} onChange={(e) => setEditForm({ ...editForm, purchase: e.target.value })} style={fieldStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Insurance (SGD)</div>
+                  <input type="number" min="0" value={editForm.insurance} onChange={(e) => setEditForm({ ...editForm, insurance: e.target.value })} style={fieldStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Registration (SGD)</div>
+                  <input type="number" min="0" value={editForm.reg} onChange={(e) => setEditForm({ ...editForm, reg: e.target.value })} style={fieldStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Other Charges (SGD)</div>
+                  <input type="number" min="0" value={editForm.otherCharges} onChange={(e) => setEditForm({ ...editForm, otherCharges: e.target.value })} style={fieldStyle} />
+                </div>
+              </div>
+            ) : (
+              <>
+                <CompactRow label="Purchase" value={fmt(car.purchase)} />
+                <CompactRow label="Insurance" value={fmt(car.insurance)} />
+                <CompactRow label="Registration" value={fmt(car.reg)} />
+                <CompactRow label="Other Charges" value={fmt(car.otherCharges || 0)} />
+                <CompactRow label="Total" value={fmt(fin.inv)} valueColor={C.green} bold />
+              </>
+            )}
+          </div>
+
+          {/* Target */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: C.navy, textTransform: "uppercase", marginBottom: 8 }}>Target</div>
+            {editing ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Target Rate (SGD/day)</div>
+                  <input type="number" min="0" value={editForm.targetRate} onChange={(e) => setEditForm({ ...editForm, targetRate: e.target.value })} style={fieldStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Running Days / Month</div>
+                  <input type="number" min="0" value={editForm.runningDaysTarget} onChange={(e) => setEditForm({ ...editForm, runningDaysTarget: e.target.value })} style={fieldStyle} />
+                </div>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <div style={{ fontSize: 10, color: C.textMuted, fontWeight: 600, marginBottom: 3 }}>Target Profit %</div>
+                  <input type="number" step="0.1" value={editForm.profitPctTarget} onChange={(e) => setEditForm({ ...editForm, profitPctTarget: e.target.value })} style={fieldStyle} />
+                </div>
+              </div>
+            ) : (
+              <>
+                <CompactRow label="Target Rate" value={car.targetRate != null ? `SGD ${car.targetRate}/day` : "—"} useMono={false} />
+                <CompactRow label="Running Days Target" value={car.runningDaysTarget != null ? `${car.runningDaysTarget} days/mo` : "—"} useMono={false} />
+                <CompactRow label="Target Profit %" value={car.profitPctTarget != null ? `${car.profitPctTarget}%` : "—"} useMono={false} />
+              </>
+            )}
           </div>
 
           {/* Financial Summary — Simplified */}
@@ -266,7 +491,7 @@ const VehicleDetailsModal = ({ car, bookings, expenses, onAddExpense, onUpdateCa
 
   <CompactRow label="Total Investment" value={fmt(fin.inv)} valueColor={C.navy} bold />
   <CompactRow label="Booking Revenue" value={fmt(fin.bookingRevenue)} valueColor={C.green} />
-  <CompactRow label="Maintenance Cost" value={fmt(fin.maintenanceBudget)} valueColor={C.amber} />
+  <CompactRow label="Vehicle Expense" value={fmt(fin.vehicleExpense)} valueColor={C.amber} />
   <CompactRow label="Net Profit" value={fmt(fin.netProfit)} valueColor={profitColor} bold />
   <CompactRow label="ROI" value={`${fin.roi.toFixed(2)}%`} valueColor={profitColor} bold />
 </div>
@@ -291,18 +516,25 @@ const VehicleDetailsModal = ({ car, bookings, expenses, onAddExpense, onUpdateCa
           </div>
 
           {/* Action Buttons */}
+          {editError && (
+            <div style={{ marginTop: 10, fontSize: 11, fontWeight: 600, color: C.red }}>{editError}</div>
+          )}
           <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-            <Btn small onClick={() => setDrawerOpen(true)} style={{ flex: 1, background: C.greenFaint, color: C.green, border: `1px solid ${C.green}` }}>
-              + Add Expense
-            </Btn>
-            {inMaintenance && (
-              <Btn small onClick={() => onCompleteMaintenance && onCompleteMaintenance(car.plate)}
-                style={{ background: C.tealFaint, color: C.teal, border: `1px solid ${C.teal}`, fontWeight: 700 }}>
-                ✓ Complete Maintenance
-              </Btn>
+            {editing ? (
+              <>
+                <Btn small onClick={handleSaveEdit} style={{ flex: 1, background: C.greenFaint, color: C.green, border: `1px solid ${C.green}` }}>
+                  Save Changes
+                </Btn>
+                <Btn small onClick={handleCancelEdit}>Cancel</Btn>
+              </>
+            ) : (
+              <>
+                <Btn small onClick={() => setDrawerOpen(true)} style={{ flex: 1, background: C.greenFaint, color: C.green, border: `1px solid ${C.green}` }}>
+                  + Add Vehicle Expense
+                </Btn>
+                <Btn small onClick={onDelete} style={{ background: C.redFaint, color: C.red, border: `1px solid ${C.red}` }}>Delete</Btn>
+              </>
             )}
-            <Btn small>Edit</Btn>
-            <Btn small onClick={onDelete} style={{ background: C.redFaint, color: C.red, border: `1px solid ${C.red}` }}>Delete</Btn>
           </div>
         </div>
       </div>
@@ -350,7 +582,8 @@ export const STATUS_PILL_FAINT = {
 const getStatusPillColor = (status) => STATUS_PILL_COLORS[status] || C.navy;
 const getStatusPillFaint = (status) => STATUS_PILL_FAINT[status] || C.tealFaint;
 
-// Fleet page only ever needs to distinguish Available / On Rental / Maintenance.
+// Fleet page only distinguishes Available / On Rental — there's no separate
+// Maintenance concept here anymore, only tracked Vehicle Expenses.
 // "Upcoming" and "Ending Today" are booking-level nuances the Dashboard and
 // Booking module still rely on — the underlying car.status (and everything
 // computeFleetStatus/Dashboard/Booking derive from it) is untouched. This is
@@ -358,18 +591,23 @@ const getStatusPillFaint = (status) => STATUS_PILL_FAINT[status] || C.tealFaint;
 // status pill or filters by status:
 //   Upcoming      → Available    (car is free until the future booking starts)
 //   Ending Today  → On Rental    (still out until the day ends)
+//   Maintenance   → Available    (no separate Maintenance state on this page)
 //   everything else passes through unchanged
 const FLEET_PAGE_STATUS_MAP = {
   Upcoming: "Available",
   "Ending Today": "On Rental",
+  Maintenance: "Available",
 };
 const toFleetPageStatus = (status) => FLEET_PAGE_STATUS_MAP[status] || status;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Fleet — table/filter list + modal details overlay
 // ─────────────────────────────────────────────────────────────────────────
-const Fleet = ({ fleet = [], onAddFleet, onUpdateCar, onDeleteCar, onCompleteMaintenance, calculateCarMetrics, bookings = [], expenses = [], onAddExpense }) => {
+const Fleet = ({ fleet = [], onAddFleet, onUpdateCar, onDeleteCar, calculateCarMetrics, bookings = [], expenses = [], onAddExpense }) => {
   const [selected, setSelected] = useState(null);
+  // True when the details modal should open straight into edit mode — set by
+  // the table's "Edit" link, as opposed to "Details →" which opens read-only.
+  const [editOnOpen, setEditOnOpen] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedPlate, setSelectedPlate] = useState("All Plates");
@@ -383,7 +621,7 @@ const Fleet = ({ fleet = [], onAddFleet, onUpdateCar, onDeleteCar, onCompleteMai
     return fleet.map(c => c.plate).sort();
   }, [fleet]);
 
-  // Status pill counts (Available / Maintenance / etc.) — computed from the
+  // Status pill counts (Available / On Rental / etc.) — computed from the
   // full fleet so the numbers on the pills don't shift as other filters change.
   const statusCounts = useMemo(() => {
     const counts = {};
@@ -410,7 +648,7 @@ const Fleet = ({ fleet = [], onAddFleet, onUpdateCar, onDeleteCar, onCompleteMai
       // Plate filter
       const matchesPlate = selectedPlate === "All Plates" || car.plate === selectedPlate;
 
-      // Status pill filter (All / Available / Maintenance / ...)
+      // Status pill filter (All / Available / On Rental / ...)
       const matchesStatusPill = statusPillFilter === "All" || toFleetPageStatus(car.status) === statusPillFilter;
 
       // Registration expiry filter (car.coe field kept for data compatibility)
@@ -630,7 +868,6 @@ const Fleet = ({ fleet = [], onAddFleet, onUpdateCar, onDeleteCar, onCompleteMai
                 { label: "Investment (SGD)", field: null },
                 { label: "Purchase Date", field: "purchaseDate" },
                 { label: "Reg. Expiry", field: "coe" },
-                { label: "Maint %", field: null },
                 { label: "Status", field: null },
                 { label: "", field: null },
               ].map(({ label, field }) => {
@@ -660,7 +897,7 @@ const Fleet = ({ fleet = [], onAddFleet, onUpdateCar, onDeleteCar, onCompleteMai
               const inv = totalInv(c);
               const d = daysUntil(c.coe);
               return (
-                <tr key={c.plate} onClick={() => setSelected(i)}
+                <tr key={c.plate} onClick={() => { setEditOnOpen(false); setSelected(i); }}
                   onMouseEnter={(e) => e.currentTarget.style.background = C.bg}
                   onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
                   style={{ borderBottom: `1px solid ${C.border}`, cursor: "pointer", background: "transparent", transition: "background 0.12s" }}>
@@ -681,10 +918,18 @@ const Fleet = ({ fleet = [], onAddFleet, onUpdateCar, onDeleteCar, onCompleteMai
                   <td style={{ padding: "11px 12px", fontSize: 11, color: d < 30 ? C.red : d < 90 ? C.amber : C.textMuted, fontWeight: d < 90 ? 700 : 400 }}>
                     {c.coe} {d < 30 ? "⚠" : d < 90 ? "⚡" : ""}
                   </td>
-                  <td style={{ padding: "11px 12px", ...mono, fontSize: 11 }}>{c.maint}%</td>
                   <td style={{ padding: "11px 12px" }}><StatusTag status={toFleetPageStatus(c.status)} /></td>
-                  <td style={{ padding: "11px 12px" }}>
-                    <span style={{ fontSize: 11, color: C.teal, fontWeight: 600 }}>Details →</span>
+                  <td style={{ padding: "11px 12px" }} onClick={(e) => e.stopPropagation()}>
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <span onClick={() => { setEditOnOpen(false); setSelected(i); }}
+                        style={{ fontSize: 11, color: C.teal, fontWeight: 600, cursor: "pointer" }}>
+                        Details →
+                      </span>
+                      <span onClick={() => { setEditOnOpen(true); setSelected(i); }}
+                        style={{ fontSize: 11, color: C.navy, fontWeight: 600, cursor: "pointer" }}>
+                        Edit
+                      </span>
+                    </div>
                   </td>
                 </tr>
               );
@@ -706,9 +951,9 @@ const Fleet = ({ fleet = [], onAddFleet, onUpdateCar, onDeleteCar, onCompleteMai
           expenses={expenses}
           onAddExpense={onAddExpense}
           onUpdateCar={onUpdateCar}
-          onCompleteMaintenance={onCompleteMaintenance}
           onDelete={() => handleDelete(car.plate)}
-          onClose={() => setSelected(null)}
+          onClose={() => { setSelected(null); setEditOnOpen(false); }}
+          startEditing={editOnOpen}
         />
       )}
     </div>

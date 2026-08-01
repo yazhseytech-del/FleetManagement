@@ -4,11 +4,11 @@ import { Btn, Badge, Modal, Input, Select, StatusTag } from "./components";
 import { useFleetData, buildAvailabilityConflictMessage, findCustomerByIC, computeCarAvailabilityTimeline } from "./useFleetData";
 
 import AddCarWizard from "./AddCarWizard";
-import { generateRentalAgreementPdf } from "./rentalagreement";
+import { generateRentalAgreementPdf } from "./rentalAgreement";
 
 import Dashboard from "./Dashboard";
 import Fleet from "./Fleet";
-import Booking from "./Booking";
+import Booking, { CHARGE_TYPES } from "./Booking";
 import Earning from "./Earning";
 import Expenses from "./Expenses";
 import PlReport from "./pl report";
@@ -29,10 +29,73 @@ const bookingFieldInputStyle = (readOnly) => ({
   cursor: readOnly ? "not-allowed" : "text",
 });
 
-const CALENDAR_STATUS_BG = { Available: "#dcfce7", "On Rental": "#ffedd5", Maintenance: "#fee2e2", "Ending Today": "#ffedd5" };
-const CALENDAR_STATUS_TEXT = { Available: "#166534", "On Rental": "#9a3412", Maintenance: "#991b1b", "Ending Today": "#9a3412" };
+const CALENDAR_STATUS_BG = { Available: "#dcfce7", "On Rental": "#ffedd5", "Ending Today": "#ffedd5" };
+const CALENDAR_STATUS_TEXT = { Available: "#166534", "On Rental": "#9a3412", "Ending Today": "#9a3412" };
 const CALENDAR_WEEKDAYS = ["S", "M", "T", "W", "T", "F", "S"];
 const toISODate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+// Step 1 (Customer Details) option lists for Customer Type and Driving
+// Experience — both plain selects, same field style as everything else on
+// that step.
+const CUSTOMER_TYPES = ["Local", "Foreigner"];
+
+// Age band shown as a read-only indicator next to the Age input on Step 1 —
+// Under 24 / 24–59 / 60+. Purely informational for now (e.g. flags a young
+// or senior driver for staff attention); it doesn't gate submission or alter
+// pricing, since no specific rule for each band was provided.
+const getAgeGroup = (age) => {
+  const n = Number(age);
+  if (age === "" || age === null || age === undefined || isNaN(n)) return "";
+  if (n < 24) return "Under 24";
+  if (n <= 59) return "24–59";
+  return "60+";
+};
+
+const HOUR_OPTIONS_12 = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
+const MINUTE_OPTIONS_60 = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, "0"));
+
+// "HH:MM" (24h) <-> { hour: "01".."12", minute: "00".."59", ampm } — every
+// other consumer of pickupTime/returnTime (combineDateTime, booking.start/end,
+// conflict checks, PDF generation) keeps reading/writing the same 24h string;
+// only the on-screen control changes to 12-hour AM/PM.
+const to12h = (hhmm) => {
+  if (!hhmm) return { hour: "12", minute: "00", ampm: "AM" };
+  const [hStr, mStr] = hhmm.split(":");
+  const h24 = parseInt(hStr, 10) || 0;
+  const ampm = h24 >= 12 ? "PM" : "AM";
+  let h12 = h24 % 12;
+  if (h12 === 0) h12 = 12;
+  return { hour: String(h12).padStart(2, "0"), minute: mStr || "00", ampm };
+};
+const to24h = (hour12, minute, ampm) => {
+  let h = parseInt(hour12, 10) % 12;
+  if (ampm === "PM") h += 12;
+  return `${String(h).padStart(2, "0")}:${minute}`;
+};
+
+// 12-hour Pickup/Return Time control — three selects (Hour/Minute/AM-PM) in
+// place of the browser's native <input type="time">, whose AM/PM-vs-24h
+// display depends on OS/browser locale rather than anything HTML lets us
+// force. Same label, same grid cell, same field width as before — only the
+// control itself changes.
+const TimeInput12h = ({ value, onChange, style }) => {
+  const { hour, minute, ampm } = to12h(value);
+  const set = (nextHour, nextMinute, nextAmpm) => onChange(to24h(nextHour, nextMinute, nextAmpm));
+  return (
+    <div style={{ display: "flex", gap: 6 }}>
+      <select value={hour} onChange={(e) => set(e.target.value, minute, ampm)} style={{ ...style, flex: 1 }}>
+        {HOUR_OPTIONS_12.map(h => <option key={h} value={h}>{h}</option>)}
+      </select>
+      <select value={minute} onChange={(e) => set(hour, e.target.value, ampm)} style={{ ...style, flex: 1 }}>
+        {MINUTE_OPTIONS_60.map(m => <option key={m} value={m}>{m}</option>)}
+      </select>
+      <select value={ampm} onChange={(e) => set(hour, minute, e.target.value)} style={{ ...style, flex: "0 0 68px" }}>
+        <option value="AM">AM</option>
+        <option value="PM">PM</option>
+      </select>
+    </div>
+  );
+};
 
 // Compact month calendar for the New Booking wizard's Step 2 — one instance
 // each for Pickup Date and Return Date (rather than one shared range-select
@@ -64,7 +127,14 @@ const SingleDateCalendar = ({ car, bookings, label, selectedDate, minDate, onSel
   timeline.forEach(({ date, status }) => { statusByDate[date] = status; });
 
   const isPast = (d) => d < today;
-  const getStatus = (d) => (isPast(d) ? "Past" : (statusByDate[toISODate(d)] || "Available"));
+  // Maintenance is not a booking-flow concept — any day the underlying
+  // timeline marks as Maintenance is just treated as unavailable, same as
+  // On Rental, so no Maintenance-specific status/color/label exists here.
+  const getStatus = (d) => {
+    if (isPast(d)) return "Past";
+    const raw = statusByDate[toISODate(d)] || "Available";
+    return raw === "Maintenance" ? "On Rental" : raw;
+  };
   const isAvailableDay = (d) => !isPast(d) && getStatus(d) === "Available";
   const isBeforeMin = (d) => minDate && toISODate(d) < minDate;
 
@@ -119,39 +189,39 @@ const SingleDateCalendar = ({ car, bookings, label, selectedDate, minDate, onSel
   };
 
   return (
-    <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px 18px", marginTop: 8, marginBottom: 8, background: C.surface, maxWidth: 340 }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: C.textSec, marginBottom: 10, textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</div>
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 10px", marginTop: 4, marginBottom: 4, background: C.surface, maxWidth: 250 }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: C.textSec, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</div>
 
       {/* Header: month/year + up/down nav */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: C.navy }}>{monthLabel}</div>
-        <div style={{ display: "flex", gap: 4 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <div style={{ fontSize: 11.5, fontWeight: 700, color: C.navy }}>{monthLabel}</div>
+        <div style={{ display: "flex", gap: 2 }}>
           <button type="button" disabled={!canGoPrev} onClick={goPrev}
-            style={{ background: "none", border: "none", cursor: canGoPrev ? "pointer" : "default", opacity: canGoPrev ? 1 : 0.3, fontSize: 14, color: C.navy, padding: 4 }}>↑</button>
+            style={{ background: "none", border: "none", cursor: canGoPrev ? "pointer" : "default", opacity: canGoPrev ? 1 : 0.3, fontSize: 11, color: C.navy, padding: 2 }}>↑</button>
           <button type="button" onClick={goNext}
-            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, color: C.navy, padding: 4 }}>↓</button>
+            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, color: C.navy, padding: 2 }}>↓</button>
         </div>
       </div>
 
       {/* Legend */}
-      <div style={{ display: "flex", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
-        {["Available", "On Rental", "Maintenance"].map(s => (
-          <div key={s} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, color: C.textSec }}>
-            <span style={{ width: 10, height: 10, borderRadius: 3, background: CALENDAR_STATUS_BG[s], border: `1px solid ${CALENDAR_STATUS_TEXT[s]}22`, display: "inline-block" }} />
+      <div style={{ display: "flex", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+        {["Available", "On Rental"].map(s => (
+          <div key={s} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 9, color: C.textSec }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: CALENDAR_STATUS_BG[s], border: `1px solid ${CALENDAR_STATUS_TEXT[s]}22`, display: "inline-block" }} />
             {s}
           </div>
         ))}
       </div>
 
       {/* Weekday header */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", marginBottom: 4 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", marginBottom: 2 }}>
         {CALENDAR_WEEKDAYS.map((w, i) => (
-          <div key={i} style={{ textAlign: "center", fontSize: 10, fontWeight: 600, color: C.textMuted, padding: "2px 0" }}>{w}</div>
+          <div key={i} style={{ textAlign: "center", fontSize: 9, fontWeight: 600, color: C.textMuted, padding: "1px 0" }}>{w}</div>
         ))}
       </div>
 
       {/* Day grid */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 2 }}>
         {cells.map((day, i) => {
           if (day === null) return <div key={`b${i}`} />;
           const d = new Date(viewYear, viewMonth, day);
@@ -173,7 +243,7 @@ const SingleDateCalendar = ({ car, bookings, label, selectedDate, minDate, onSel
               onClick={() => handleDayClick(day)}
               title={status}
               style={{
-                padding: "7px 0", fontSize: 12, borderRadius: 6,
+                padding: "4px 0", fontSize: 10.5, borderRadius: 4,
                 border: isSelected ? `2px solid ${C.navy}` : isToday ? `1px solid ${C.navy}` : "1px solid transparent",
                 fontFamily: "inherit", cursor: clickable ? "pointer" : "default", boxSizing: "border-box",
                 background: status !== "Past" ? CALENDAR_STATUS_BG[status] : "transparent",
@@ -188,17 +258,17 @@ const SingleDateCalendar = ({ car, bookings, label, selectedDate, minDate, onSel
         })}
       </div>
 
-      {dayError && <div style={{ fontSize: 11, color: C.red, marginTop: 10 }}>{dayError}</div>}
+      {dayError && <div style={{ fontSize: 10, color: C.red, marginTop: 6 }}>{dayError}</div>}
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14 }}>
-        <div style={{ fontSize: 11, color: C.textMuted }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
+        <div style={{ fontSize: 10, color: C.textMuted }}>
           {selectedDate ? <>Selected: <strong style={{ color: C.navy }}>{selectedDate}</strong></> : "No date selected"}
         </div>
-        <div style={{ display: "flex", gap: 14 }}>
+        <div style={{ display: "flex", gap: 10 }}>
           <button type="button" onClick={() => { onClear(); setDayError(""); }}
-            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11.5, fontWeight: 600, color: C.teal, padding: 0 }}>Clear</button>
+            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 10.5, fontWeight: 600, color: C.teal, padding: 0 }}>Clear</button>
           <button type="button" onClick={goToday}
-            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11.5, fontWeight: 600, color: C.teal, padding: 0 }}>Today</button>
+            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 10.5, fontWeight: 600, color: C.teal, padding: 0 }}>Today</button>
         </div>
       </div>
     </div>
@@ -212,6 +282,12 @@ export default function FleetOpzApp() {
   const [showNewBooking, setShowNewBooking] = useState(false);
   const [showNewFleet, setShowNewFleet] = useState(false);
   const [showNewUser, setShowNewUser] = useState(false);
+  // Set to the booking's id while the New Booking wizard is reused to edit
+  // an existing booking (opened via Booking.jsx's Edit button) — null means
+  // the wizard is in normal create mode. Read throughout the wizard to swap
+  // labels/behavior (title, submit label, skip the Payment step, update
+  // instead of create on submit) without forking into a second component.
+  const [editingBookingId, setEditingBookingId] = useState(null);
   // Set to a booking id right after Create Booking succeeds, so the
   // Bookings screen auto-opens that booking's Detail view (Overview tab).
   // Booking.jsx consumes it once and calls back to clear it — see
@@ -254,6 +330,12 @@ export default function FleetOpzApp() {
     contact: "",
     passport: "",
     address: "",
+    // Step 1 additions: Customer Type, Age, Driving Experience. Age drives
+    // no other logic yet (see the Age input's own comment) — it's just
+    // captured on the booking, same as everything else on this step.
+    customerType: "Local",
+    age: "",
+    drivingExperience: "",
     // start/end stay as combined "YYYY-MM-DDTHH:MM" strings — every existing
     // consumer (submit validation, conflict check, availability timeline,
     // PDF generation) reads these, so Step 2 shows separate Date/Time inputs
@@ -267,8 +349,6 @@ export default function FleetOpzApp() {
     returnTime: "",
     pickup: "",
     drop: "",
-    mileageOut: "",
-    fuelOut: "",
     rate: "",
     deductible: "",
     vatRate: "",
@@ -278,8 +358,12 @@ export default function FleetOpzApp() {
     // excluded from the subtotal/VAT/total math below.
     deliveryCharge: "",
     collectionCharge: "",
-    additionalDriverCharge: "",
     otherCharges: "",
+    // Itemized charges added in this step (Late Fee, Damage Fee, Parking
+    // Fine, etc. — same CHARGE_TYPES list the Return screen uses). Each gets
+    // tagged origin: "booking" so computeBookingInvoice bakes it into the
+    // signed Agreement Total, same as the 4 fixed fields above.
+    charges: [],
     additionalDrivers: [], // [{ id, name, license, licenseExpiry, contact }] — optional
     license: "",
     licenseExpiry: "",
@@ -292,8 +376,56 @@ export default function FleetOpzApp() {
     amountCollected: "0",
     paymentMethod: "Cash",
     referenceCode: "",
+    // Payment Date/Time for the Advance — defaults to right now
+    // (still fully editable) so this money's place in Payment History is
+    // accurate even if entered/backdated later.
+    amountCollectedDate: new Date().toISOString().slice(0, 10),
+    amountCollectedTime: new Date().toTimeString().slice(0, 5),
+    // Vehicle Handover fields — captured from Step 5 (Review) while editing
+    // an existing booking, not at creation time. startingMileage/fuelLevel
+    // are auto-filled (see openEditBookingModal) from the same car's most
+    // recent completed booking's Mileage In/Fuel In, but stay editable.
+    startingMileage: "",
+    fuelLevel: "",
+    vehicleCondition: "",
   });
   const [attachmentError, setAttachmentError] = useState("");
+
+  // Step 3's "+ Add Charge" mini-form — same shape as BookingDetailModal's
+  // own chargeType/chargeAmount/chargeNote state on the Return screen, kept
+  // separate since this is a different component/modal entirely.
+  const [chargeType, setChargeType] = useState(CHARGE_TYPES[0].value);
+  const [chargeAmount, setChargeAmount] = useState("");
+  const [chargeNote, setChargeNote] = useState("");
+  const selectedChargeType = CHARGE_TYPES.find(t => t.value === chargeType) || CHARGE_TYPES[0];
+
+  // Adds an itemized charge to newBookingData.charges, tagged origin:
+  // "booking" so it's baked into the signed Agreement Total (not just the
+  // Final Invoice) once the booking is created — see computeBookingInvoice.
+  const handleAddBookingCharge = () => {
+    const amt = Number(chargeAmount);
+    if (!chargeAmount || amt <= 0) {
+      alert("Enter a charge amount greater than 0");
+      return;
+    }
+    const newCharge = {
+      id: `${Date.now()}`,
+      type: selectedChargeType.value,
+      label: selectedChargeType.label.replace(" (auto-calculable)", ""),
+      amount: amt,
+      note: chargeNote,
+      taxable: selectedChargeType.taxable,
+      addedAt: new Date().toISOString(),
+      origin: "booking",
+    };
+    setNewBookingData(prev => ({ ...prev, charges: [...(prev.charges || []), newCharge] }));
+    setChargeAmount("");
+    setChargeNote("");
+  };
+
+  const handleRemoveBookingCharge = (id) => {
+    setNewBookingData(prev => ({ ...prev, charges: (prev.charges || []).filter(c => c.id !== id) }));
+  };
 
   // The New Booking modal is now a 2-step wizard: Step 1 is Customer Details
   // (IC-driven auto-fill), Step 2 is Booking Details (unchanged submit logic,
@@ -301,6 +433,7 @@ export default function FleetOpzApp() {
   // so it never reopens mid-wizard.
   const [bookingStep, setBookingStep] = useState(1);
   const BOOKING_STEP_COUNT = 5;
+  const BOOKING_STEP_LABELS = ["Customer Details", "Booking Details", "Pricing & Charges", "Payment", "Review & Confirm"];
 
   // Combines a separate date + time pair into the single "YYYY-MM-DDTHH:MM"
   // string start/end already use everywhere else. Defaults the time to
@@ -411,10 +544,93 @@ export default function FleetOpzApp() {
     setShowNewBooking(true);
   };
 
+  // Finds the given car's most recent returned booking (any booking with a
+  // Mileage In on file, excluding the one currently being edited) and hands
+  // back its Mileage In / Fuel In — used to auto-fill the next booking's
+  // Starting Mileage / Fuel Level in the Vehicle Handover section below.
+  // "Most recent" is by actual return time (falling back to when it was
+  // marked returned) so a car with several past rentals always pulls from
+  // the latest one, not just whichever happens to sort first in the array.
+  const getPreviousMileageFuel = (plate, excludeBookingId) => {
+    const candidates = fleetData.bookings.filter(b =>
+      b.plate === plate && b.id !== excludeBookingId && b.mileageIn
+    );
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) =>
+      new Date(b.actualReturnAt || b.returnedAt || 0) - new Date(a.actualReturnAt || a.returnedAt || 0)
+    );
+    return { mileage: candidates[0].mileageIn, fuel: candidates[0].fuelIn || "" };
+  };
+
+  // Opens the same wizard pre-filled with an existing booking's data, for
+  // editing — reverses the New Booking mapping (pickupDate/pickupTime/
+  // returnDate/returnTime are split back out of start/end, same fields the
+  // wizard's date/time pickers write into). Payment fields stay at their
+  // defaults since Step 4 is read-only in edit mode — see BOOKING_STEP_COUNT
+  // usages below — actual payments are recorded from Booking.jsx instead.
+  //
+  // Starting Mileage / Fuel Level for the Vehicle Handover section (Step 5):
+  // if this booking already has its own values saved (e.g. re-opening Edit
+  // after a Complete Handover attempt failed validation), those win; otherwise
+  // they're auto-filled from the same car's last returned booking via
+  // getPreviousMileageFuel — either way they stay fully editable.
+  const openEditBookingModal = (booking) => {
+    const previous = booking.startingMileage
+      ? null
+      : getPreviousMileageFuel(booking.plate, booking.id);
+    setEditingBookingId(booking.id);
+    setNewBookingData({
+      plate: booking.plate || "",
+      customer: booking.customer || "",
+      ic: booking.ic || "",
+      contact: booking.contact || "",
+      passport: booking.passport || "",
+      address: booking.address || "",
+      customerType: booking.customerType || "Local",
+      age: booking.age || "",
+      drivingExperience: booking.drivingExperience ?? "",
+      start: booking.start || "",
+      end: booking.end || "",
+      pickupDate: booking.start ? booking.start.slice(0, 10) : "",
+      pickupTime: booking.start ? booking.start.slice(11, 16) : "",
+      returnDate: booking.end ? booking.end.slice(0, 10) : "",
+      returnTime: booking.end ? booking.end.slice(11, 16) : "",
+      pickup: booking.pickup || "",
+      drop: booking.drop || "",
+      rate: booking.rate ?? "",
+      deductible: booking.deductible ?? "",
+      vatRate: booking.vatRate ?? "",
+      deliveryCharge: booking.deliveryCharge ?? "",
+      collectionCharge: booking.collectionCharge ?? "",
+      otherCharges: booking.otherCharges ?? "",
+      charges: booking.charges || [],
+      additionalDrivers: booking.additionalDrivers || [],
+      license: booking.license || "",
+      licenseExpiry: booking.licenseExpiry || "",
+      attachment: booking.attachment || null,
+      comments: booking.comments || "",
+      amountCollected: "0",
+      paymentMethod: "Cash",
+      referenceCode: "",
+      amountCollectedDate: new Date().toISOString().slice(0, 10),
+      amountCollectedTime: new Date().toTimeString().slice(0, 5),
+      startingMileage: booking.startingMileage || previous?.mileage || "",
+      fuelLevel: booking.fuelLevel || previous?.fuel || "",
+      vehicleCondition: booking.vehicleCondition || "",
+    });
+    setMatchedCustomer(null);
+    setBookingStep(1);
+    setShowNewBooking(true);
+  };
+
   const closeNewBookingModal = () => {
     setShowNewBooking(false);
     setBookingStep(1);
-    setNewBookingData({ plate: "", customer: "", ic: "", contact: "", passport: "", address: "", start: "", end: "", pickupDate: "", pickupTime: "", returnDate: "", returnTime: "", pickup: "", drop: "", mileageOut: "", fuelOut: "", rate: "", deductible: "", vatRate: "", deliveryCharge: "", collectionCharge: "", additionalDriverCharge: "", otherCharges: "", additionalDrivers: [], license: "", licenseExpiry: "", attachment: null, comments: "", amountCollected: "0", paymentMethod: "Cash", referenceCode: "" });
+    setEditingBookingId(null);
+    setNewBookingData({ plate: "", customer: "", ic: "", contact: "", passport: "", address: "", customerType: "Local", age: "", drivingExperience: "", start: "", end: "", pickupDate: "", pickupTime: "", returnDate: "", returnTime: "", pickup: "", drop: "", rate: "", deductible: "", vatRate: "", deliveryCharge: "", collectionCharge: "", otherCharges: "", charges: [], additionalDrivers: [], license: "", licenseExpiry: "", attachment: null, comments: "", amountCollected: "0", paymentMethod: "Cash", referenceCode: "", amountCollectedDate: new Date().toISOString().slice(0, 10), amountCollectedTime: new Date().toTimeString().slice(0, 5), startingMileage: "", fuelLevel: "", vehicleCondition: "" });
+    setChargeType(CHARGE_TYPES[0].value);
+    setChargeAmount("");
+    setChargeNote("");
     setAttachmentError("");
     setMatchedCustomer(null);
     setCreatedBookingInfo(null);
@@ -461,7 +677,6 @@ export default function FleetOpzApp() {
         onAddFleet={fleetData.addFleet}  // ✅ CRITICAL FIX: Pass the actual handler that will be called by AddCarWizard
         onUpdateCar={fleetData.updateFleet}
         onDeleteCar={fleetData.deleteFleet}
-        onCompleteMaintenance={fleetData.completeMaintenance}
         calculateCarMetrics={fleetData.calculateCarMetrics}
         bookings={fleetData.bookings}
         expenses={fleetData.expenses}
@@ -478,6 +693,9 @@ export default function FleetOpzApp() {
         onDeleteBooking={fleetData.deleteBooking}
         detailBookingId={detailBookingId}
         onDetailBookingIdHandled={() => setDetailBookingId(null)}
+        onEditBooking={openEditBookingModal}
+        selectedCar={selectedCar}
+        selectedRange={selectedRange}
       />
     ),
     earnings: (
@@ -642,26 +860,84 @@ export default function FleetOpzApp() {
       alert(`${newBookingData.plate} could not be found in the fleet. Please pick another car.`);
       return;
     }
+
+    // Edit mode — update the existing booking instead of creating a new one.
+    // Skips the conflict check entirely when car/dates are unchanged from
+    // the original (the booking already legitimately owns that slot), and
+    // re-runs it only when the car or dates were actually edited. Payment
+    // fields are never touched here — Step 4 is read-only while editing, and
+    // real payments are recorded from Booking.jsx's Pricing & Payment tab.
+    if (editingBookingId) {
+      const original = fleetData.bookings.find(b => b.id === editingBookingId);
+      const carOrDatesChanged = !original
+        || original.plate !== newBookingData.plate
+        || original.start !== newBookingData.start
+        || original.end !== newBookingData.end;
+      if (carOrDatesChanged) {
+        const conflict = fleetData.checkBookingConflict(newBookingData.plate, newBookingData.start, newBookingData.end, editingBookingId);
+        if (conflict) {
+          alert(buildAvailabilityConflictMessage(conflict, newBookingData.start));
+          return;
+        }
+      }
+      const { amountCollected, paymentMethod, referenceCode, amountCollectedDate, amountCollectedTime, ...editableFields } = newBookingData;
+      fleetData.updateBooking(editingBookingId, {
+        ...editableFields,
+        ageGroup: getAgeGroup(newBookingData.age),
+      });
+      closeNewBookingModal();
+      setActive("bookings");
+      setDetailBookingId(editingBookingId);
+      return;
+    }
+
     // Prevent double-booking: same car, overlapping dates.
     const conflict = fleetData.checkBookingConflict(newBookingData.plate, newBookingData.start, newBookingData.end);
     if (conflict) {
       alert(buildAvailabilityConflictMessage(conflict, newBookingData.start));
       return;
     }
+    // Advance is the first payment on this booking — same rule
+    // as Record Payment later (Booking.jsx): it can never exceed what's owed.
+    const amountCollectedNow = Number(newBookingData.amountCollected) || 0;
+    if (amountCollectedNow > bookingTotal) {
+      alert(`Advance exceeds the Grand Total (${formatSGD(bookingTotal)}). Enter ${formatSGD(bookingTotal)} or less.`);
+      return;
+    }
+    if (amountCollectedNow > 0 && (!newBookingData.amountCollectedDate || !newBookingData.amountCollectedTime)) {
+      alert("Enter the Payment Date & Time for the Advance");
+      return;
+    }
+    // Built explicitly here, once, as the booking's first Payment History
+    // entry — computeBookingInvoice (Booking.jsx) then treats `payments` as
+    // the sole source of truth, so recording a later payment via Record
+    // Payment only ever appends to this array and never re-derives or
+    // duplicates this entry.
+    const initialPayments = amountCollectedNow > 0
+      ? [{
+          id: "initial",
+          amount: amountCollectedNow,
+          method: newBookingData.paymentMethod,
+          reference: newBookingData.referenceCode || "",
+          addedAt: `${newBookingData.amountCollectedDate}T${newBookingData.amountCollectedTime}`,
+        }]
+      : [];
     const createdBooking = fleetData.addBooking({
       ...newBookingData,
-      status: "Active",
+      ageGroup: getAgeGroup(newBookingData.age),
+      // Confirmed, not Active — this booking can be made well ahead of the
+      // rental and every detail here stays editable (via Booking.jsx) right
+      // up until the pickup day. It only becomes Active, and only gets its
+      // Rental Agreement, once Vehicle Handover is completed below.
+      status: "Confirmed",
+      createdAt: new Date().toISOString(),
+      payments: initialPayments,
     });
-    // Booking succeeded — unlock the Agreement button on this same Review
-    // step instead of generating the PDF automatically. The modal stays
-    // open so the user sees the button flip from disabled to enabled; they
-    // download when ready, then close via the "Done" button.
+    // Booking succeeded — the modal stays open on Review so staff see the
+    // confirmation; there's no Agreement to download yet, since the
+    // agreement is only generated once Vehicle Handover happens — from the
+    // Edit Booking flow's Review step (see handleCompleteHandover).
     setCreatedBookingInfo({ booking: createdBooking, car: selectedCar });
-  };
-
-  const handleDownloadAgreement = () => {
-    if (!createdBookingInfo) return;
-    generateRentalAgreementPdf(createdBookingInfo.booking, createdBookingInfo.car);
   };
 
   // Called from the "Done" button that replaces "Confirm & Create Booking"
@@ -674,6 +950,42 @@ export default function FleetOpzApp() {
       setActive("bookings");
       setDetailBookingId(bookingId);
     }
+  };
+
+  // Vehicle Handover — now lives inside Step 5 (Review) of the Edit Booking
+  // flow itself, rather than a separate modal. Validates Starting Mileage /
+  // Fuel Level, flips the booking to Active, and generates the Rental
+  // Agreement immediately (no extra click needed) — same fields/behavior the
+  // old standalone handover modal used, just triggered from here instead.
+  // Completed/Closed status derivation and payment logic are untouched.
+  const handleCompleteHandover = () => {
+    if (!editingBookingId) return;
+    if (newBookingData.startingMileage === "" || Number(newBookingData.startingMileage) < 0) {
+      alert("Enter a valid Starting Mileage");
+      return;
+    }
+    if (!newBookingData.fuelLevel) {
+      alert("Select the Fuel Level");
+      return;
+    }
+    const original = fleetData.bookings.find(b => b.id === editingBookingId);
+    const car = fleetData.fleet.find(c => c.plate === newBookingData.plate);
+    const updates = {
+      status: "Active",
+      startingMileage: newBookingData.startingMileage,
+      fuelLevel: newBookingData.fuelLevel,
+      vehicleCondition: newBookingData.vehicleCondition,
+      handoverAt: new Date().toISOString(),
+    };
+    fleetData.updateBooking(editingBookingId, updates);
+    // The Rental Agreement is generated right here, for the first time —
+    // never at booking creation — since it needs the mileage/fuel/condition
+    // just captured above. Built from the merged booking locally since
+    // updateBooking's state update isn't synchronous.
+    generateRentalAgreementPdf({ ...original, ...updates }, car);
+    closeNewBookingModal();
+    setActive("bookings");
+    setDetailBookingId(editingBookingId);
   };
 
   const handleNewUserSubmit = (e) => {
@@ -692,22 +1004,31 @@ export default function FleetOpzApp() {
   const bookingRateCharge = (Number(newBookingData.rate) || 0) * bookingDays;
   const bookingDeliveryCharge = Number(newBookingData.deliveryCharge) || 0;
   const bookingCollectionCharge = Number(newBookingData.collectionCharge) || 0;
-  const bookingAdditionalDriverCharge = Number(newBookingData.additionalDriverCharge) || 0;
   const bookingOtherCharges = Number(newBookingData.otherCharges) || 0;
   // Security Deposit is refundable, not a rental charge — kept out of the
   // subtotal/VAT/total math and shown only as an informational figure
   // (Step 4 Payment, and later the Charges & Payment tab).
   const bookingDeductible = Number(newBookingData.deductible) || 0;
   const bookingVatRatePct = Number(newBookingData.vatRate) || 0;
-  const bookingSubtotal = bookingRateCharge + bookingDeliveryCharge + bookingCollectionCharge + bookingAdditionalDriverCharge + bookingOtherCharges;
-  const bookingVatAmount = bookingSubtotal * (bookingVatRatePct / 100);
-  const bookingTotal = bookingSubtotal + bookingVatAmount;
+  // Itemized charges added via "+ Add Charge" below — taxable ones go
+  // through VAT with everything else, non-taxable ones are added flat on
+  // top, matching how computeBookingInvoice treats origin: "booking" charges
+  // once the booking is actually created.
+  const bookingCharges = newBookingData.charges || [];
+  const bookingChargesTaxableTotal = bookingCharges.filter(c => c.taxable).reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const bookingChargesNonTaxableTotal = bookingCharges.filter(c => !c.taxable).reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const bookingFixedSubtotal = bookingRateCharge + bookingDeliveryCharge + bookingCollectionCharge + bookingOtherCharges;
+  const bookingTaxableBase = bookingFixedSubtotal + bookingChargesTaxableTotal;
+  const bookingSubtotal = bookingFixedSubtotal + bookingChargesTaxableTotal + bookingChargesNonTaxableTotal;
+  const bookingVatAmount = bookingTaxableBase * (bookingVatRatePct / 100);
+  const bookingTotal = bookingTaxableBase + bookingVatAmount + bookingChargesNonTaxableTotal;
   // Derived for Step 4 (Payment) / Step 5 (Review) — how much is still owed
-  // after whatever's being collected right now. Not clamped to zero: an
-  // overpayment should surface as a visibly negative balance rather than
-  // being silently hidden, since that's a real number staff need to see.
+  // after whatever's being collected right now. Clamped at 0 to match
+  // Balance Due everywhere else in the app (Booking.jsx); overpayment itself
+  // is blocked at submit time (see handleSubmitBooking) rather than shown
+  // here as a negative number.
   const bookingAmountCollected = Number(newBookingData.amountCollected) || 0;
-  const bookingBalance = bookingTotal - bookingAmountCollected;
+  const bookingBalance = Math.max(0, bookingTotal - bookingAmountCollected);
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: C.bg, fontFamily: "'Inter', 'Segoe UI', sans-serif", fontSize: 13, color: C.textPri }}>
@@ -829,18 +1150,35 @@ export default function FleetOpzApp() {
             {/* Header */}
             <div style={{ padding: "18px 24px 16px", borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                <div>
-                  <div style={{ fontSize: 17, fontWeight: 700, color: C.navy }}>New Booking</div>
-                  <div style={{ fontSize: 11.5, color: C.textMuted, marginTop: 2 }}>
-                    Step {bookingStep} of {BOOKING_STEP_COUNT} — {["Customer Details", "Booking Details", "Pricing & Charges", "Payment", "Review & Confirm"][bookingStep - 1]}
-                  </div>
-                </div>
+                <div style={{ fontSize: 17, fontWeight: 700, color: C.navy }}>{editingBookingId ? `Edit Booking — ${editingBookingId}` : "New Booking"}</div>
                 <button onClick={closeNewBookingModal} aria-label="Close" style={{ background: "none", border: "none", fontSize: 18, color: C.textMuted, cursor: "pointer", lineHeight: 1, padding: 4 }}>✕</button>
               </div>
-              <div style={{ display: "flex", gap: 6, marginTop: 14 }}>
-                {Array.from({ length: BOOKING_STEP_COUNT }).map((_, i) => (
-                  <div key={i} style={{ flex: 1, height: 5, borderRadius: 3, background: i < bookingStep ? C.teal : C.border }} />
-                ))}
+              <div style={{ display: "flex", alignItems: "center", marginTop: 16 }}>
+                {BOOKING_STEP_LABELS.flatMap((label, i) => {
+                  const stepNum = i + 1;
+                  const isActive = stepNum === bookingStep;
+                  const stepEl = (
+                    <div key={`step-${stepNum}`} style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                      <div style={{
+                        width: 26, height: 26, borderRadius: "50%", flexShrink: 0,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: 12, fontWeight: 700,
+                        background: isActive ? C.teal : C.bg,
+                        color: isActive ? "#fff" : C.textMuted,
+                        border: isActive ? "none" : `1px solid ${C.border}`,
+                      }}>
+                        {stepNum}
+                      </div>
+                      <div style={{ fontSize: 13.5, fontWeight: isActive ? 700 : 500, color: isActive ? C.navy : C.textMuted, whiteSpace: "nowrap" }}>
+                        {label}
+                      </div>
+                    </div>
+                  );
+                  const connectorEl = stepNum < BOOKING_STEP_COUNT
+                    ? <div key={`connector-${stepNum}`} style={{ flex: 1, height: 2, background: C.border, margin: "0 10px", minWidth: 12 }} />
+                    : null;
+                  return connectorEl ? [stepEl, connectorEl] : [stepEl];
+                })}
               </div>
             </div>
 
@@ -916,13 +1254,51 @@ export default function FleetOpzApp() {
                       )}
                     </div>
                     <div>
-                      <label style={bookingFieldLabelStyle}>License Expiry Date</label>
+                      <label style={bookingFieldLabelStyle}>Customer Type</label>
+                      <select
+                        value={newBookingData.customerType}
+                        onChange={(e) => setNewBookingData({ ...newBookingData, customerType: e.target.value })}
+                        style={bookingFieldInputStyle(false)}
+                      >
+                        {CUSTOMER_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+                    <div>
+                      <label style={bookingFieldLabelStyle}>Age</label>
                       <input
-                        type="date"
-                        value={newBookingData.licenseExpiry}
-                        disabled={!!matchedCustomer}
-                        onChange={(e) => !matchedCustomer && setNewBookingData({ ...newBookingData, licenseExpiry: e.target.value })}
-                        style={bookingFieldInputStyle(!!matchedCustomer)}
+                        type="number"
+                        min="0"
+                        value={newBookingData.age}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v !== "" && Number(v) < 0) return;
+                          setNewBookingData({ ...newBookingData, age: v });
+                        }}
+                        placeholder="e.g., 32"
+                        style={bookingFieldInputStyle(false)}
+                      />
+                      {newBookingData.age !== "" && (
+                        <div style={{ fontSize: 10.5, color: C.textMuted, marginTop: 5, fontWeight: 600 }}>
+                          Age Group: {getAgeGroup(newBookingData.age)}
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <label style={bookingFieldLabelStyle}>Driving Experience (years)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={newBookingData.drivingExperience}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v !== "" && Number(v) < 0) return;
+                          setNewBookingData({ ...newBookingData, drivingExperience: v });
+                        }}
+                        placeholder="e.g., 5"
+                        style={bookingFieldInputStyle(false)}
                       />
                     </div>
                   </div>
@@ -1027,11 +1403,9 @@ export default function FleetOpzApp() {
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 14 }}>
                     <div>
                       <label style={bookingFieldLabelStyle}>Pickup Time</label>
-                      <input
-                        type="time"
+                      <TimeInput12h
                         value={newBookingData.pickupTime}
-                        onChange={(e) => {
-                          const pickupTime = e.target.value;
+                        onChange={(pickupTime) => {
                           setNewBookingData(prev => ({ ...prev, pickupTime, start: combineDateTime(prev.pickupDate, pickupTime) }));
                         }}
                         style={bookingFieldInputStyle(false)}
@@ -1039,11 +1413,9 @@ export default function FleetOpzApp() {
                     </div>
                     <div>
                       <label style={bookingFieldLabelStyle}>Return Time</label>
-                      <input
-                        type="time"
+                      <TimeInput12h
                         value={newBookingData.returnTime}
-                        onChange={(e) => {
-                          const returnTime = e.target.value;
+                        onChange={(returnTime) => {
                           setNewBookingData(prev => ({ ...prev, returnTime, end: combineDateTime(prev.returnDate, returnTime) }));
                         }}
                         style={bookingFieldInputStyle(false)}
@@ -1062,38 +1434,6 @@ export default function FleetOpzApp() {
                       value={newBookingData.drop}
                       onChange={(e) => setNewBookingData({ ...newBookingData, drop: e.target.value })}
                       placeholder="Downtown Dubai"
-                    />
-                  </div>
-
-                  <div style={{ fontSize: 13, fontWeight: 700, color: C.navy, margin: "18px 0 14px" }}>⛽ Vehicle Condition at Pickup</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
-                    <div>
-                      <label style={bookingFieldLabelStyle}>Mileage Out (km)</label>
-                      <input
-                        type="number"
-                        min="0"
-                        value={newBookingData.mileageOut}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          if (v !== "" && Number(v) < 0) return;
-                          setNewBookingData({ ...newBookingData, mileageOut: v });
-                        }}
-                        placeholder="9210"
-                        style={bookingFieldInputStyle(false)}
-                      />
-                    </div>
-                    <Select
-                      label="Fuel Out"
-                      value={newBookingData.fuelOut}
-                      onChange={(e) => setNewBookingData({ ...newBookingData, fuelOut: e.target.value })}
-                      options={[
-                        { value: "", label: "Select fuel level" },
-                        { value: "Empty", label: "Empty" },
-                        { value: "1/4", label: "1/4" },
-                        { value: "1/2", label: "1/2" },
-                        { value: "3/4", label: "3/4" },
-                        { value: "Full", label: "Full" },
-                      ]}
                     />
                   </div>
 
@@ -1289,20 +1629,6 @@ export default function FleetOpzApp() {
                       />
                     </div>
                     <div>
-                      <label style={bookingFieldLabelStyle}>Additional Driver Charge</label>
-                      <input
-                        type="number" min="0"
-                        value={newBookingData.additionalDriverCharge}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          if (v !== "" && Number(v) < 0) return;
-                          setNewBookingData({ ...newBookingData, additionalDriverCharge: v });
-                        }}
-                        placeholder="0"
-                        style={bookingFieldInputStyle(false)}
-                      />
-                    </div>
-                    <div>
                       <label style={bookingFieldLabelStyle}>Other Charges</label>
                       <input
                         type="number" min="0"
@@ -1317,6 +1643,60 @@ export default function FleetOpzApp() {
                       />
                     </div>
                   </div>
+
+                  {/* Itemized charges — same design/interaction as the Return
+                      screen's Charges & Payment tab. Anything added here is
+                      part of the signed agreement (baked into Grand Total
+                      below), unlike charges added later after return. */}
+                  <div style={{ fontSize: 11.5, color: C.textMuted, marginBottom: 14 }}>
+                    Itemized charges added here are part of the signed Agreement — they're included in the Grand Total below.
+                  </div>
+
+                  <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px 18px", marginBottom: 16 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, color: C.navy, marginBottom: 12 }}>+ Add Additional Driver Charge</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 12, alignItems: "end", marginBottom: 10 }}>
+                      <div>
+                        <label style={bookingFieldLabelStyle}>Charge Type</label>
+                        <select value={chargeType} onChange={(e) => setChargeType(e.target.value)} style={bookingFieldInputStyle(false)}>
+                          {CHARGE_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label style={bookingFieldLabelStyle}>Amount</label>
+                        <input type="number" min="0" value={chargeAmount} onChange={(e) => setChargeAmount(e.target.value)} placeholder="0.00" style={bookingFieldInputStyle(false)} />
+                      </div>
+                      <Btn primary onClick={handleAddBookingCharge}>+ Add</Btn>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "end", gap: 12 }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={bookingFieldLabelStyle}>Note (optional)</label>
+                        <input type="text" value={chargeNote} onChange={(e) => setChargeNote(e.target.value)} placeholder="e.g., 2 hours late, or fine reference #" style={bookingFieldInputStyle(false)} />
+                      </div>
+                      <div style={{ fontSize: 11, color: C.textMuted, whiteSpace: "nowrap", paddingBottom: 8 }}>
+                        {selectedChargeType.taxable ? "Taxable — VAT applies" : "Non-Taxable"}
+                      </div>
+                    </div>
+                  </div>
+
+                  {bookingCharges.length > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      {bookingCharges.map(c => (
+                        <div key={c.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 16px", marginBottom: 10 }}>
+                          <div>
+                            <div style={{ fontSize: 12.5, fontWeight: 600, color: C.navy, display: "flex", alignItems: "center", gap: 8 }}>
+                              {c.label} — {formatSGD(Number(c.amount) || 0)}
+                              <span style={{
+                                fontSize: 9.5, fontWeight: 700, padding: "2px 7px", borderRadius: 999,
+                                background: C.bg, color: c.taxable ? C.navy : C.textMuted, border: `1px solid ${C.border}`,
+                              }}>{c.taxable ? "Taxable" : "Non-Taxable"}</span>
+                            </div>
+                            {c.note && <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>{c.note}</div>}
+                          </div>
+                          <button onClick={() => handleRemoveBookingCharge(c.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 15 }} aria-label="Remove charge">🗑</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   <div style={{ marginBottom: 14 }}>
                     <label style={bookingFieldLabelStyle}>Security Deposit (refundable — not a rental charge)</label>
@@ -1358,12 +1738,17 @@ export default function FleetOpzApp() {
                       { label: "Rental Vehicle Charge", value: bookingRateCharge },
                       { label: "Delivery Charge", value: bookingDeliveryCharge },
                       { label: "Collection Charge", value: bookingCollectionCharge },
-                      { label: "Additional Driver Charge", value: bookingAdditionalDriverCharge },
                       { label: "Other Charges", value: bookingOtherCharges },
                     ].filter(row => row.value > 0 || row.label === "Rental Vehicle Charge").map(row => (
                       <div key={row.label} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 12.5, color: C.textSec }}>
                         <span>{row.label}</span>
                         <span style={mono}>{formatSGD(row.value)}</span>
+                      </div>
+                    ))}
+                    {bookingCharges.map(c => (
+                      <div key={c.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 12.5, color: C.textSec }}>
+                        <span>{c.label}</span>
+                        <span style={mono}>{formatSGD(Number(c.amount) || 0)}</span>
                       </div>
                     ))}
                     <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", marginTop: 4, paddingTop: 10, borderTop: `1px solid ${C.border}`, fontSize: 12.5, color: C.textSec }}>
@@ -1396,56 +1781,94 @@ export default function FleetOpzApp() {
                     </div>
                   </div>
 
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
-                    <div>
-                      <label style={bookingFieldLabelStyle}>Amount Collected Now</label>
-                      <input
-                        type="number"
-                        min="0"
-                        value={newBookingData.amountCollected}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          if (v !== "" && Number(v) < 0) return;
-                          setNewBookingData({ ...newBookingData, amountCollected: v });
-                        }}
-                        placeholder="0"
-                        style={bookingFieldInputStyle(false)}
-                      />
+                  {editingBookingId ? (
+                    <div style={{ fontSize: 12, color: C.textMuted, border: `1px solid ${C.border}`, borderRadius: 10, padding: "14px 16px", background: C.bg }}>
+                      Payments aren't recorded here while editing — record or view payments from the booking's <b>Pricing & Payment</b> tab instead.
                     </div>
-                    <div>
-                      <label style={bookingFieldLabelStyle}>Payment Method</label>
-                      <select
-                        value={newBookingData.paymentMethod}
-                        onChange={(e) => setNewBookingData({ ...newBookingData, paymentMethod: e.target.value })}
-                        style={bookingFieldInputStyle(false)}
-                      >
-                        <option value="Cash">Cash</option>
-                        <option value="Card">Card</option>
-                        <option value="Bank Transfer">Bank Transfer</option>
-                        <option value="Online">Online</option>
-                      </select>
-                    </div>
-                  </div>
+                  ) : (
+                    <>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+                        <div>
+                          <label style={bookingFieldLabelStyle}>Advance</label>
+                          <input
+                            type="number"
+                            min="0"
+                            value={newBookingData.amountCollected}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              if (v !== "" && Number(v) < 0) return;
+                              setNewBookingData({ ...newBookingData, amountCollected: v });
+                            }}
+                            placeholder="0"
+                            style={bookingFieldInputStyle(false)}
+                          />
+                        </div>
+                        <div>
+                          <label style={bookingFieldLabelStyle}>Payment Method</label>
+                          <select
+                            value={newBookingData.paymentMethod}
+                            onChange={(e) => setNewBookingData({ ...newBookingData, paymentMethod: e.target.value })}
+                            style={bookingFieldInputStyle(false)}
+                          >
+                            <option value="Cash">Cash</option>
+                            <option value="Card">Card</option>
+                            <option value="Bank Transfer">Bank Transfer</option>
+                            <option value="Online">Online</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label style={bookingFieldLabelStyle}>Payment Date</label>
+                          <input
+                            type="date"
+                            value={newBookingData.amountCollectedDate}
+                            onChange={(e) => setNewBookingData({ ...newBookingData, amountCollectedDate: e.target.value })}
+                            style={bookingFieldInputStyle(false)}
+                          />
+                        </div>
+                        <div>
+                          <label style={bookingFieldLabelStyle}>Payment Time</label>
+                          <input
+                            type="time"
+                            value={newBookingData.amountCollectedTime}
+                            onChange={(e) => setNewBookingData({ ...newBookingData, amountCollectedTime: e.target.value })}
+                            style={bookingFieldInputStyle(false)}
+                          />
+                        </div>
+                      </div>
 
-                  <div style={{ marginBottom: 20 }}>
-                    <label style={bookingFieldLabelStyle}>Reference / Auth Code</label>
-                    <input
-                      type="text"
-                      value={newBookingData.referenceCode}
-                      onChange={(e) => setNewBookingData({ ...newBookingData, referenceCode: e.target.value })}
-                      placeholder="Optional — transaction/auth reference"
-                      style={bookingFieldInputStyle(false)}
-                    />
-                  </div>
+                      <div style={{ marginBottom: 20 }}>
+                        <label style={bookingFieldLabelStyle}>Reference / Auth Code</label>
+                        <input
+                          type="text"
+                          value={newBookingData.referenceCode}
+                          onChange={(e) => setNewBookingData({ ...newBookingData, referenceCode: e.target.value })}
+                          placeholder="Optional — transaction/auth reference"
+                          style={bookingFieldInputStyle(false)}
+                        />
+                      </div>
 
-                  <div style={{ border: `1px solid ${C.tealFaint}`, borderRadius: 10, padding: "14px 16px", background: C.tealFaint, display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ fontSize: 13, fontWeight: 600, color: C.navy }}>Balance after this payment</span>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: C.teal, ...mono }}>{formatSGD(bookingBalance)}</span>
-                  </div>
+                      <div style={{ border: `1px solid ${C.tealFaint}`, borderRadius: 10, padding: "14px 16px", background: C.tealFaint, display: "flex", justifyContent: "space-between" }}>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: C.navy }}>Balance after this payment</span>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: C.teal, ...mono }}>{formatSGD(bookingBalance)}</span>
+                      </div>
+                    </>
+                  )}
                 </>
               ) : (
                 <>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: C.navy, marginBottom: 16 }}>✅ Review & Confirm</div>
+                  {createdBookingInfo ? (
+                    <div style={{ border: `1px solid ${C.tealFaint}`, borderRadius: 10, padding: "14px 16px", background: C.tealFaint, marginBottom: 16 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: C.navy, marginBottom: 4 }}>✅ Booking Confirmed</div>
+                      <div style={{ fontSize: 11.5, color: C.textSec }}>
+                        This booking is saved as <b>Confirmed</b> and every detail stays editable until the rental starts.
+                        On the pickup day, open <b>Edit</b> on this booking and complete <b>Vehicle Handover</b> in the Review
+                        step to record mileage, fuel, and condition — that's what generates the Rental Agreement and moves
+                        this booking to Active.
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 13, fontWeight: 700, color: C.navy, marginBottom: 16 }}>{editingBookingId ? "✅ Review & Save Changes" : "✅ Review & Confirm"}</div>
+                  )}
 
                   {(() => {
                     const reviewCar = fleetData.fleet.find(c => c.plate === newBookingData.plate);
@@ -1473,20 +1896,99 @@ export default function FleetOpzApp() {
                           <div style={{ fontSize: 11.5, color: C.textMuted, marginTop: 4 }}>{bookingDays} Day{bookingDays === 1 ? "" : "s"} · Daily</div>
                         </div>
 
-                        <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px 18px", background: C.bg }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 12.5, color: C.textSec }}>
-                            <span>Total</span>
-                            <span style={mono}>{formatSGD(bookingTotal)}</span>
+                        {editingBookingId ? (
+                          <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px 18px", background: C.bg, display: "flex", justifyContent: "space-between" }}>
+                            <span style={{ fontSize: 13.5, fontWeight: 700, color: C.navy }}>Agreement Total</span>
+                            <span style={{ fontSize: 13.5, fontWeight: 700, color: C.teal, ...mono }}>{formatSGD(bookingTotal)}</span>
                           </div>
-                          <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 12.5, color: C.textSec }}>
-                            <span>Paid Now</span>
-                            <span style={mono}>{formatSGD(bookingAmountCollected)}</span>
+                        ) : (
+                          <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px 18px", background: C.bg }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 12.5, color: C.textSec }}>
+                              <span>Total</span>
+                              <span style={mono}>{formatSGD(bookingTotal)}</span>
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 12.5, color: C.textSec }}>
+                              <span>Advance</span>
+                              <span style={mono}>{formatSGD(bookingAmountCollected)}</span>
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+                              <span style={{ fontSize: 13.5, fontWeight: 700, color: C.navy }}>Balance</span>
+                              <span style={{ fontSize: 13.5, fontWeight: 700, color: C.teal, ...mono }}>{formatSGD(bookingBalance)}</span>
+                            </div>
                           </div>
-                          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
-                            <span style={{ fontSize: 13.5, fontWeight: 700, color: C.navy }}>Balance</span>
-                            <span style={{ fontSize: 13.5, fontWeight: 700, color: C.teal, ...mono }}>{formatSGD(bookingBalance)}</span>
-                          </div>
-                        </div>
+                        )}
+
+                        {/* Vehicle Handover — lives in Step 5 (Review) of the Edit
+                            Booking flow, above the Save Changes footer. Only shown
+                            while editing an existing booking that hasn't been handed
+                            over yet; once handoverAt is set, this collapses to a
+                            simple confirmation line instead (booking is already
+                            Active and the Agreement already generated). Completing
+                            this doesn't use the Save Changes button below — it's
+                            its own action (handleCompleteHandover) that updates the
+                            booking, flips it to Active, and immediately generates
+                            the Rental Agreement. */}
+                        {editingBookingId && (() => {
+                          const editingBooking = fleetData.bookings.find(b => b.id === editingBookingId);
+                          const alreadyHandedOver = !!editingBooking?.handoverAt;
+                          return alreadyHandedOver ? (
+                            <div style={{ marginTop: 18, border: `1px solid ${C.tealFaint}`, borderRadius: 10, padding: "14px 16px", background: C.tealFaint }}>
+                              <div style={{ fontSize: 13, fontWeight: 700, color: C.navy }}>✅ Vehicle Handover completed</div>
+                              <div style={{ fontSize: 11.5, color: C.textSec, marginTop: 2 }}>
+                                {formatDateTime(editingBooking.handoverAt)} — booking is Active and the Rental Agreement has been generated.
+                              </div>
+                            </div>
+                          ) : (
+                            <div style={{ marginTop: 18, border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px 18px" }}>
+                              <div style={{ fontSize: 13, fontWeight: 700, color: C.navy, marginBottom: 4 }}>🔑 Vehicle Handover</div>
+                              <div style={{ fontSize: 11.5, color: C.textMuted, marginBottom: 16 }}>
+                                When the customer arrives for pickup, record the starting mileage, fuel, and condition below.
+                                Completing this moves the booking to Active and generates the Rental Agreement.
+                              </div>
+                              <div style={{ marginBottom: 14 }}>
+                                <label style={bookingFieldLabelStyle}>Starting Mileage (km) <span style={{ color: C.red }}>*</span></label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={newBookingData.startingMileage}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    if (v !== "" && Number(v) < 0) return;
+                                    setNewBookingData({ ...newBookingData, startingMileage: v });
+                                  }}
+                                  placeholder="9210"
+                                  style={bookingFieldInputStyle(false)}
+                                />
+                              </div>
+                              <div style={{ marginBottom: 14 }}>
+                                <label style={bookingFieldLabelStyle}>Fuel Level <span style={{ color: C.red }}>*</span></label>
+                                <select
+                                  value={newBookingData.fuelLevel}
+                                  onChange={(e) => setNewBookingData({ ...newBookingData, fuelLevel: e.target.value })}
+                                  style={bookingFieldInputStyle(false)}
+                                >
+                                  <option value="">Select fuel level</option>
+                                  <option value="Empty">Empty</option>
+                                  <option value="1/4">1/4</option>
+                                  <option value="1/2">1/2</option>
+                                  <option value="3/4">3/4</option>
+                                  <option value="Full">Full</option>
+                                </select>
+                              </div>
+                              <div style={{ marginBottom: 16 }}>
+                                <label style={bookingFieldLabelStyle}>Vehicle Condition</label>
+                                <textarea
+                                  value={newBookingData.vehicleCondition}
+                                  onChange={(e) => setNewBookingData({ ...newBookingData, vehicleCondition: e.target.value })}
+                                  placeholder="Note any existing scratches, dents, or issues before handing over the keys"
+                                  rows={3}
+                                  style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 12, fontFamily: "inherit", outline: "none", resize: "vertical", boxSizing: "border-box" }}
+                                />
+                              </div>
+                              <Btn primary onClick={handleCompleteHandover}>✅ Complete Handover</Btn>
+                            </div>
+                          );
+                        })()}
                       </>
                     );
                   })()}
@@ -1504,12 +2006,9 @@ export default function FleetOpzApp() {
               ) : bookingStep < BOOKING_STEP_COUNT ? (
                 <Btn primary onClick={() => setBookingStep(bookingStep + 1)}>Next →</Btn>
               ) : createdBookingInfo ? (
-                <div style={{ display: "flex", gap: 10 }}>
-                  <Btn primary onClick={handleDownloadAgreement}>📄 Agreement</Btn>
-                  <Btn onClick={handleFinishBookingFlow}>Done</Btn>
-                </div>
+                <Btn primary onClick={handleFinishBookingFlow}>Done</Btn>
               ) : (
-                <Btn primary onClick={handleNewBookingSubmit}>Confirm & Create Booking</Btn>
+                <Btn primary onClick={handleNewBookingSubmit}>{editingBookingId ? "Save Changes" : "Confirm & Create Booking"}</Btn>
               )}
             </div>
           </div>

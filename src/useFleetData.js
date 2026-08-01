@@ -50,6 +50,93 @@ const toDateStr = (v) => {
   return isNaN(d) ? String(v).slice(0, 10) : d.toISOString().slice(0, 10);
 };
 
+// ── INVOICE CALC ─────────────────────────────────────────────────────────────
+// Single source of truth for a booking's full invoice picture — used by the
+// Bookings table/detail view, and by computeBookingStatus below to decide
+// whether a Completed booking has been fully paid off (→ Closed).
+//
+// Two totals matter here and they are deliberately different things:
+//   - `agreementTotal`  — the signed quote: Rental Vehicle Charge + Delivery
+//     + Collection + Additional Driver + Other Charges + any itemized
+//     charges added in the New Booking wizard's Pricing & Charges step
+//     (origin: "booking"), then VAT. This is what Pricing Details shows, and
+//     it never changes after the booking is created — everything in it was
+//     itemized before the agreement was signed.
+//   - `finalInvoiceTotal` — the agreement total plus whatever's been added
+//     afterward in Charges & Payment (origin: "return" — taxable charges
+//     pushed back through VAT, non-taxable charges added flat on top). This
+//     is the actual amount owed, and what Overview's Payment Summary and the
+//     Payments section use for Balance Due.
+// Security Deposit is intentionally excluded from both — it's refundable,
+// not a rental charge, so it's tracked as its own figure.
+export const computeBookingInvoice = (b) => {
+  // Once a vehicle is actually returned, actualReturnAt reflects when it
+  // really came back (early or late) — the invoice should bill for that,
+  // not the originally planned end date/time.
+  const effectiveEnd = b.actualReturnAt || b.end;
+  const days = (b.start && effectiveEnd) ? Math.max(0, Math.round((new Date(effectiveEnd) - new Date(b.start)) / 86400000)) : 0;
+  const rateCharge = (Number(b.rate) || 0) * days;
+  const deliveryCharge = Number(b.deliveryCharge) || 0;
+  const collectionCharge = Number(b.collectionCharge) || 0;
+  const additionalDriverCharge = Number(b.additionalDriverCharge) || 0;
+  const otherCharges = Number(b.otherCharges) || 0;
+  const deposit = Number(b.deductible) || 0;
+  const vatPct = Number(b.vatRate) || 0;
+
+  // Charges are split by when they were itemized. `origin: "booking"` ones
+  // came from the New Booking wizard's Pricing & Charges step — they're part
+  // of what's signed, so they're baked into the Agreement Total below right
+  // alongside the 4 fixed fields. Everything else (added later, in Charges &
+  // Payment after return) keeps only ever affecting the Final Invoice Total,
+  // never the Agreement Total — same behavior as before this split existed.
+  // Kept in sync with Booking.jsx's copy of this function — see that file's
+  // comment for the full rationale.
+  const charges = b.charges || [];
+  const bookingCharges = charges.filter(c => c.origin === "booking");
+  const postCharges = charges.filter(c => c.origin !== "booking");
+
+  const bookingChargesTaxableTotal = bookingCharges.filter(c => c.taxable).reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const bookingChargesNonTaxableTotal = bookingCharges.filter(c => !c.taxable).reduce((s, c) => s + (Number(c.amount) || 0), 0);
+
+  const fixedChargesSubtotal = rateCharge + deliveryCharge + collectionCharge + additionalDriverCharge + otherCharges;
+  const agreementTaxableBase = fixedChargesSubtotal + bookingChargesTaxableTotal;
+  const agreementVatAmount = agreementTaxableBase * (vatPct / 100);
+  const agreementSubtotal = fixedChargesSubtotal + bookingChargesTaxableTotal + bookingChargesNonTaxableTotal;
+  const agreementTotal = agreementTaxableBase + agreementVatAmount + bookingChargesNonTaxableTotal;
+
+  const taxableChargesTotal = postCharges.filter(c => c.taxable).reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const nonTaxableChargesTotal = postCharges.filter(c => !c.taxable).reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const taxableSubtotal = agreementTaxableBase + taxableChargesTotal;
+  const finalVatAmount = taxableSubtotal * (vatPct / 100);
+  const finalInvoiceTotal = taxableSubtotal + finalVatAmount + bookingChargesNonTaxableTotal + nonTaxableChargesTotal;
+
+  // Older bookings only ever had a single amountCollected value from the
+  // wizard's Payment step — surface that as the first "payment" if no
+  // payments array has been recorded yet, so history is never empty when
+  // money has actually changed hands.
+  const payments = b.payments || (Number(b.amountCollected) > 0
+    ? [{ id: "seed", amount: Number(b.amountCollected), method: b.paymentMethod || "Cash", reference: b.referenceCode || "", addedAt: b.createdAt || null }]
+    : []);
+  const totalPaid = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const balanceDue = finalInvoiceTotal - totalPaid;
+
+  return {
+    days, rateCharge, deliveryCharge, collectionCharge, additionalDriverCharge, otherCharges, deposit, vatPct,
+    agreementSubtotal, agreementVatAmount, agreementTotal,
+    charges, bookingCharges, postCharges,
+    taxableChargesTotal, nonTaxableChargesTotal, taxableSubtotal, finalVatAmount, finalInvoiceTotal,
+    payments, totalPaid, balanceDue,
+  };
+};
+
+// A booking is "closed out" once it's reached either terminal status —
+// Completed (returned, balance may still be pending) or Closed (returned AND
+// fully paid). Anything that should react to a booking being done — earnings
+// generation, releasing the car — needs both, not just a literal "Completed"
+// check, since a booking that's paid in full at return time goes straight to
+// Closed and would otherwise never match "Completed".
+export const isBookingClosedOut = (status) => status === "Completed" || status === "Closed";
+
 // ── STATUS DERIVATION ────────────────────────────────────────────────────────
 // Booking status is derived from today's date vs start/end, instead of being a
 // static field that only changes when someone clicks a button. "Cancelled" is
@@ -59,15 +146,27 @@ const toDateStr = (v) => {
 // Exported so any screen that needs "what would this booking's status be on
 // date X" (not just today) can reuse this exact logic — e.g. the Booking
 // module's forward-looking availability timeline calls this once per day.
+//
+// Reaching a completed state still works exactly as before (return date
+// passed, or staff force-completed/confirmed the return) — that part is
+// unchanged. What's new: a completed booking advances one step further, from
+// "Completed" to "Closed", once it's fully paid (including any charges added
+// after return). Any pending balance keeps it sitting in "Completed".
 export const computeBookingStatus = (booking, todayStr) => {
   if (booking.cancelled) return "Cancelled";
-  if (booking.forceCompleted) return "Completed";
+
+  const resolveCompletion = () => {
+    const { balanceDue } = computeBookingInvoice(booking);
+    return balanceDue <= 0 ? "Closed" : "Completed";
+  };
+
+  if (booking.forceCompleted) return resolveCompletion();
   if (!booking.start || !booking.end) return booking.status || "Active";
   const startStr = toDateStr(booking.start);
   const endStr = toDateStr(booking.end);
   if (todayStr < startStr) return "Upcoming";
   if (todayStr === endStr) return "Ending Today";
-  if (todayStr > endStr) return "Completed";
+  if (todayStr > endStr) return resolveCompletion();
   return "Active"; // start <= today < end
 };
 
@@ -75,7 +174,8 @@ export const computeBookingStatus = (booking, todayStr) => {
 // be inferred from bookings alone (it's a manual/automatic flag set when a
 // rental completes, and cleared when maintenance is completed), everything
 // else follows directly from the car's own bookings:
-//   Maintenance   → set by the "booking completed" effect below / cleared by completeMaintenance()
+//   Maintenance   → only ever set manually (e.g. directly on fleet data); nothing
+//                   in this app moves a car into Maintenance automatically anymore
 //   Ending Today  → has a booking whose derived status is "Ending Today"
 //   On Rental     → has a booking whose derived status is "Active"
 //   Upcoming      → has a future booking ("Upcoming") and nothing above applies
@@ -102,7 +202,7 @@ const computeFleetStatus = (car, bookingsWithStatus) => {
 // else (the car's overall current status, the booking table's status
 // column) — it's just not a per-day timeline state:
 //   Maintenance   → projected using the car's maintenanceStartDate + MAINTENANCE_MAX_DAYS,
-//                   the same window the auto-release effect (above) enforces
+//                   for a car manually placed into Maintenance (nothing automatic sets this)
 //   Ending Today  → a booking's computeBookingStatus for that day is "Ending Today"
 //   On Rental     → a booking's computeBookingStatus for that day is "Active"
 //   Available     → none of the above (including every day before a future
@@ -293,48 +393,31 @@ export const useFleetData = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookings]);
 
-  // Automatically move a car into "Maintenance" once one of its bookings'
+  // A car goes straight back to "Available" once one of its bookings'
   // derived status becomes "Completed" (whether that's because the end date
-  // passed, or because staff force-completed it early via "Mark Done").
-  // We stamp maintenanceStartDate so the 2-day alert and 3-day auto-release
-  // below have something to count from, and flag maintenanceTriggered so this
-  // effect doesn't re-fire once maintenance has already been handled for it.
+  // passed, or because staff force-completed it early / confirmed a return).
+  // The automatic "Maintenance" flow has been removed entirely — nothing
+  // moves a car into Maintenance automatically anymore. maintenanceTriggered
+  // just prevents this effect from re-firing once a booking's already been
+  // handled.
   useEffect(() => {
     const newlyCompleted = bookings.filter(
       b => computeBookingStatus(b, todayStr) === "Completed" && !b.maintenanceTriggered
     );
     if (newlyCompleted.length === 0) return;
 
-    const platesToMaintain = new Set(newlyCompleted.map(b => b.plate));
+    const platesToRelease = new Set(newlyCompleted.map(b => b.plate));
 
     setFleet(prev => prev.map(c =>
-      platesToMaintain.has(c.plate) ? { ...c, status: "Maintenance", maintenanceStartDate: todayStr } : c
+      platesToRelease.has(c.plate)
+        ? { ...c, status: "Available", maintenanceStartDate: null, maintenanceCompletedAt: todayStr, maintenanceAutoReleased: false }
+        : c
     ));
     setBookings(prev => prev.map(b =>
       newlyCompleted.some(nb => nb.id === b.id) ? { ...b, maintenanceTriggered: true } : b
     ));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookings]);
-
-  // A car should never sit in "Maintenance" for more than 3 days — if nobody
-  // has completed it manually by then, release it back to "Available"
-  // automatically so the fleet doesn't get silently stuck.
-  useEffect(() => {
-    const overdue = fleet.filter(c => {
-      if (c.status !== "Maintenance" || !c.maintenanceStartDate) return false;
-      const daysIn = Math.floor((new Date(todayStr) - new Date(c.maintenanceStartDate)) / 86400000);
-      return daysIn >= 3;
-    });
-    if (overdue.length === 0) return;
-
-    const platesToRelease = new Set(overdue.map(c => c.plate));
-    setFleet(prev => prev.map(c =>
-      platesToRelease.has(c.plate)
-        ? { ...c, status: "Available", maintenanceStartDate: null, maintenanceCompletedAt: todayStr, maintenanceAutoReleased: true }
-        : c
-    ));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fleet, todayStr]);
 
   // ── FLEET OPERATIONS ──────────────────────────────────────────────────────
   const addFleet = (car) => {
@@ -355,17 +438,6 @@ export const useFleetData = () => {
 
   const deleteFleet = (plate) => {
     setFleet(prev => prev.filter(c => c.plate !== plate));
-  };
-
-  // Manual early-completion of maintenance — the one manual status change the
-  // workflow allows. If maintenance runs its full 3 days untouched, the
-  // auto-release effect above handles it instead.
-  const completeMaintenance = (plate) => {
-    setFleet(prev => prev.map(c =>
-      c.plate === plate && c.status === "Maintenance"
-        ? { ...c, status: "Available", maintenanceStartDate: null, maintenanceCompletedAt: todayStr, maintenanceAutoReleased: false }
-        : c
-    ));
   };
 
   // Exposed to the booking form so it can block double-bookings before
@@ -700,7 +772,6 @@ export const useFleetData = () => {
     addFleet,
     updateFleet,
     deleteFleet,
-    completeMaintenance,
 
     // Booking operations
     addBooking,

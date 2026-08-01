@@ -158,6 +158,15 @@ export const generateInvoicePdf = (booking, car, inv) => {
   // --- Rental Schedule ---
   y = sectionHeader(y, "Rental Schedule");
   y += 1;
+  // Once the vehicle has actually been returned, actualReturnAt ("YYYY-MM-DDTHH:MM")
+  // reflects the real return date/time — possibly edited for an early or late
+  // return — and takes over the Drop-off column from the originally planned
+  // returnDate/returnTime.
+  const [actualReturnDatePart, actualReturnTimePart] = booking.actualReturnAt
+    ? booking.actualReturnAt.split("T")
+    : [null, null];
+  const dropDate = actualReturnDatePart || booking.returnDate;
+  const dropTime = actualReturnTimePart || booking.returnTime;
   const col0 = contentWidth * 0.25, col1 = contentWidth * 0.375, col2 = contentWidth * 0.375;
   y = cellRow(y, [
     { w: col0, text: "" },
@@ -167,12 +176,12 @@ export const generateInvoicePdf = (booking, car, inv) => {
   y = cellRow(y, [
     { w: col0, text: "Date", bold: true },
     { w: col1, text: fmtDateSlash(booking.pickupDate), align: "center" },
-    { w: col2, text: fmtDateSlash(booking.returnDate), align: "center" },
+    { w: col2, text: fmtDateSlash(dropDate), align: "center" },
   ]);
   y = cellRow(y, [
     { w: col0, text: "Time", bold: true },
     { w: col1, text: fmtTime12h(booking.pickupTime), align: "center" },
-    { w: col2, text: fmtTime12h(booking.returnTime), align: "center" },
+    { w: col2, text: fmtTime12h(dropTime), align: "center" },
   ]);
   y = cellRow(y, [
     { w: col0, text: "Location", bold: true },

@@ -1,8 +1,14 @@
 import { useState } from "react";
-import { C, mono, fmt, totalInv, generateTargetOptions } from "./theme";
+import { C, mono, fmt, totalInv, daysUntil, generateTargetOptions } from "./theme";
 import { Btn, Input } from "./components";
 
-const STEPS = ["Purchase Details", "Investment Summary", "System Suggestions", "Confirm"];
+const STEPS = [
+  "Purchase & Vehicle Details",
+  "Compliance & Validity",
+  "Total Investment",
+  "Target & System Suggestions",
+  "Review & Confirm",
+];
 
 // Maintenance % and the rental price band are no longer collected from the
 // user in this wizard — they're fixed system fallbacks so generateTargetOptions
@@ -17,21 +23,80 @@ const emptyCar = () => ({
   model: "",
   year: "",
   color: "",
+  fuelType: "Petrol",
+  transmission: "Automatic",
   purchase: "",
   insurance: "",
   reg: "",
   otherCharges: "",
   purchaseDate: "",
+  // Compliance & Validity — each has its own expiry date; days-remaining and
+  // status are derived automatically wherever they're shown (Compliance step,
+  // Review step, and later the Fleet Edit view) rather than entered by hand.
+  insuranceExpiry: "",
+  ltaTransferDate: "",
+  roadTaxExpiry: "",
+  inspectionExpiry: "",
   coe: "",
- 
 });
 
-// Full onboarding flow for a new car: enter what it cost, let the system total
-// the investment automatically, then pick one of 3 system-generated targets
-// (maintenance % and rental price band are fixed system defaults, no longer
-// entered by the user). Finishing hands a complete car record — including the
-// chosen target — up to the parent, which is the only thing that actually
-// gets saved to fleet data.
+// Compact select field matching the visual weight of the Input component
+// used everywhere else in this wizard (label above, bordered control below).
+const selectFieldStyle = {
+  width: "100%", padding: "9px 10px", borderRadius: 8, border: `1px solid ${C.border}`,
+  fontFamily: "inherit", fontSize: 12.5, outline: "none", background: C.surface,
+  color: C.textPri, cursor: "pointer", boxSizing: "border-box",
+};
+
+const SelectField = ({ label, value, onChange, options }) => (
+  <div>
+    <div style={{ fontSize: 10.5, color: C.textMuted, fontWeight: 600, marginBottom: 4 }}>{label}</div>
+    <select value={value} onChange={onChange} style={selectFieldStyle}>
+      {options.map(o => <option key={o} value={o}>{o}</option>)}
+    </select>
+  </div>
+);
+
+// Status derived from days-remaining for any compliance/validity date —
+// shared by the Compliance step and the Review step summary so the two
+// never disagree about what "Expiring" vs "Expired" means.
+const complianceStatus = (days) => {
+  if (days == null || isNaN(days)) return { label: "—", color: C.textMuted };
+  if (days < 0) return { label: "Expired", color: C.red };
+  if (days <= 30) return { label: "Expiring Soon", color: C.red };
+  if (days <= 90) return { label: "Expiring", color: C.amber };
+  return { label: "Active", color: C.green };
+};
+
+// A single Compliance & Validity field: a date input plus an auto-computed
+// days-remaining / status readout underneath — no manual status entry.
+const ComplianceField = ({ label, value, onChange }) => {
+  const days = value ? daysUntil(value) : null;
+  const st = complianceStatus(days);
+  return (
+    <div>
+      <Input label={label} type="date" value={value} onChange={onChange} />
+      {value && (
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, marginBottom: 4, fontSize: 10.5 }}>
+          <span style={{ color: C.textMuted }}>
+            {days >= 0 ? `${days} day${days === 1 ? "" : "s"} remaining` : `${Math.abs(days)} day${Math.abs(days) === 1 ? "" : "s"} overdue`}
+          </span>
+          <span style={{ fontWeight: 700, color: st.color }}>{st.label}</span>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Full onboarding flow for a new car: enter what it cost and its vehicle/
+// compliance details, let the system total the investment automatically,
+// then pick one of 3 system-generated targets (maintenance % and rental
+// price band are fixed system defaults, no longer entered by the user).
+// Finishing hands a complete car record — including compliance dates, fuel
+// type, transmission, and the chosen target — up to the parent, which is the
+// only thing that actually gets saved to fleet data. Editing any of this
+// after the car is added happens from the Fleet Details view, not here — this
+// wizard is add-only, with no separate "edit" affordance of its own.
 const AddCarWizard = ({ onComplete, onClose }) => {
   const [step, setStep] = useState(0);
   const [car, setCar] = useState(emptyCar());
@@ -46,7 +111,12 @@ const AddCarWizard = ({ onComplete, onClose }) => {
     (parseFloat(car.reg) || 0) +
     (parseFloat(car.otherCharges) || 0);
 
-  const canProceedStep0 = car.plate && car.make && car.model && car.year && car.purchase && car.coe;
+  // Step 1 — Purchase & Vehicle Details. COE moved to the Compliance step, so
+  // it's no longer required here.
+  const canProceedStep0 = car.plate && car.make && car.model && car.year && car.purchase;
+  // Step 2 — Compliance & Validity. COE is required since generateTargetOptions
+  // needs it (together with purchaseDate) to work out the car's remaining runway.
+  const canProceedStep1 = !!car.coe;
 
   const handleGenerate = () => {
     // theme.js's generateTargetOptions now targets a CAGR per tier (Conservative/
@@ -64,7 +134,7 @@ const AddCarWizard = ({ onComplete, onClose }) => {
     });
     setOptions(opts);
     setChosen(null);
-    setStep(2);
+    setStep(3);
   };
 
   const handleFinish = () => {
@@ -76,8 +146,13 @@ const AddCarWizard = ({ onComplete, onClose }) => {
       otherCharges: parseFloat(car.otherCharges) || 0,
       year: parseInt(car.year),
       purchaseDate: car.purchaseDate,
+      fuelType: car.fuelType,
+      transmission: car.transmission,
+      insuranceExpiry: car.insuranceExpiry,
+      ltaTransferDate: car.ltaTransferDate,
+      roadTaxExpiry: car.roadTaxExpiry,
+      inspectionExpiry: car.inspectionExpiry,
       coe: car.coe,
-      
       maint: DEFAULT_MAINT_PCT,
       minRate: DEFAULT_MIN_RATE,
       maxRate: DEFAULT_MAX_RATE,
@@ -109,7 +184,7 @@ const AddCarWizard = ({ onComplete, onClose }) => {
         </div>
 
         <div style={{ padding: "20px 24px" }}>
-          {/* STEP 0 — Purchase Details */}
+          {/* STEP 1 — Purchase & Vehicle Details */}
           {step === 0 && (
             <div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -121,7 +196,12 @@ const AddCarWizard = ({ onComplete, onClose }) => {
                 <Input label="Model" value={car.model} onChange={e => setField("model", e.target.value)} placeholder="e.g., Corolla" />
               </div>
               <Input label="Colour" value={car.color} onChange={e => setField("color", e.target.value)} placeholder="e.g., Silver" />
-              
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <SelectField label="Fuel Type" value={car.fuelType} onChange={e => setField("fuelType", e.target.value)} options={["Petrol", "Diesel"]} />
+                <SelectField label="Transmission" value={car.transmission} onChange={e => setField("transmission", e.target.value)} options={["Automatic", "Manual"]} />
+              </div>
+
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                 <Input label="Purchase Price (SGD)" type="number" value={car.purchase} onChange={e => setField("purchase", e.target.value)} placeholder="e.g., 26000" />
                 <Input label="Insurance (SGD)" type="number" value={car.insurance} onChange={e => setField("insurance", e.target.value)} placeholder="e.g., 1200" />
@@ -130,15 +210,28 @@ const AddCarWizard = ({ onComplete, onClose }) => {
                 <Input label="Registration (SGD)" type="number" value={car.reg} onChange={e => setField("reg", e.target.value)} placeholder="e.g., 1300" />
                 <Input label="Other Charges (SGD)" type="number" value={car.otherCharges} onChange={e => setField("otherCharges", e.target.value)} placeholder="e.g., 200" />
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <Input label="Purchase Date" type="date" value={car.purchaseDate} onChange={e => setField("purchaseDate", e.target.value)} />
-                <Input label="COE Expiry Date" type="date" value={car.coe} onChange={e => setField("coe", e.target.value)} />
-              </div>
+              <Input label="Purchase Date" type="date" value={car.purchaseDate} onChange={e => setField("purchaseDate", e.target.value)} />
             </div>
           )}
 
-          {/* STEP 1 — Investment Summary (auto-calculated) */}
+          {/* STEP 2 — Compliance & Validity */}
           {step === 1 && (
+            <div>
+              <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 12 }}>Enter each validity date — days remaining and status are calculated automatically.</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <ComplianceField label="Insurance Expiry" value={car.insuranceExpiry} onChange={e => setField("insuranceExpiry", e.target.value)} />
+                <ComplianceField label="LTA Transfer Validity" value={car.ltaTransferDate} onChange={e => setField("ltaTransferDate", e.target.value)} />
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <ComplianceField label="Road Tax Expiry" value={car.roadTaxExpiry} onChange={e => setField("roadTaxExpiry", e.target.value)} />
+                <ComplianceField label="Inspection Due" value={car.inspectionExpiry} onChange={e => setField("inspectionExpiry", e.target.value)} />
+              </div>
+              <ComplianceField label="COE Expiry Date" value={car.coe} onChange={e => setField("coe", e.target.value)} />
+            </div>
+          )}
+
+          {/* STEP 3 — Total Investment (auto-calculated) */}
+          {step === 2 && (
             <div>
               <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 12 }}>System auto-calculated from what you entered — nothing to fill in here.</div>
               {[
@@ -159,8 +252,8 @@ const AddCarWizard = ({ onComplete, onClose }) => {
             </div>
           )}
 
-          {/* STEP 2 — System Suggestions */}
-          {step === 2 && options && (
+          {/* STEP 4 — Target & System Suggestions */}
+          {step === 3 && options && (
             <div>
               <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 12 }}>Pick the target that fits — each tier targets a different annual return (CAGR) compounded over the car's remaining COE runway; higher-return tiers assume fewer running days per month.</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
@@ -196,8 +289,8 @@ const AddCarWizard = ({ onComplete, onClose }) => {
             </div>
           )}
 
-          {/* STEP 3 — Confirm */}
-          {step === 3 && chosen && (
+          {/* STEP 5 — Review & Confirm */}
+          {step === 4 && chosen && (
             <div>
               <div style={{ padding: 14, background: C.greenFaint, borderRadius: 8, borderLeft: `3px solid ${C.green}`, marginBottom: 14 }}>
                 <div style={{ fontSize: 12, fontWeight: 700, color: C.green }}>✓ {chosen.label} target selected</div>
@@ -205,7 +298,14 @@ const AddCarWizard = ({ onComplete, onClose }) => {
               </div>
               {[
                 ["Car", `${car.make} ${car.model} (${car.plate})`],
+                ["Fuel Type", car.fuelType],
+                ["Transmission", car.transmission],
                 ["Total Investment", fmt(investment)],
+                ["Insurance Expiry", car.insuranceExpiry || "—"],
+                ["LTA Transfer Validity", car.ltaTransferDate || "—"],
+                ["Road Tax Expiry", car.roadTaxExpiry || "—"],
+                ["Inspection Due", car.inspectionExpiry || "—"],
+                ["COE Expiry", car.coe],
                 ["Selected Target", chosen.label],
                 ["Target CAGR", `${chosen.cagr}%`],
                 ["Expected Monthly Income", fmt(chosen.monthlyIncome)],
@@ -229,9 +329,10 @@ const AddCarWizard = ({ onComplete, onClose }) => {
           <div style={{ display: "flex", gap: 8 }}>
             <Btn secondary onClick={onClose}>Cancel</Btn>
             {step === 0 && <Btn primary onClick={() => setStep(1)} disabled={!canProceedStep0} style={{ opacity: canProceedStep0 ? 1 : 0.5 }}>Next</Btn>}
-            {step === 1 && <Btn primary onClick={handleGenerate}>Generate Suggestions</Btn>}
-            {step === 2 && <Btn primary onClick={() => setStep(3)} disabled={!chosen} style={{ opacity: chosen ? 1 : 0.5 }}>Next</Btn>}
-            {step === 3 && <Btn primary onClick={handleFinish}>Add Car</Btn>}
+            {step === 1 && <Btn primary onClick={() => setStep(2)} disabled={!canProceedStep1} style={{ opacity: canProceedStep1 ? 1 : 0.5 }}>Next</Btn>}
+            {step === 2 && <Btn primary onClick={handleGenerate}>Generate Suggestions</Btn>}
+            {step === 3 && <Btn primary onClick={() => setStep(4)} disabled={!chosen} style={{ opacity: chosen ? 1 : 0.5 }}>Next</Btn>}
+            {step === 4 && <Btn primary onClick={handleFinish}>Add Car</Btn>}
           </div>
         </div>
       </div>
