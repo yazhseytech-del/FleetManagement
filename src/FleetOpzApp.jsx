@@ -8,7 +8,7 @@ import { generateRentalAgreementPdf } from "./rentalAgreement";
 
 import Dashboard from "./Dashboard";
 import Fleet from "./Fleet";
-import Booking, { CHARGE_TYPES } from "./Booking";
+import Booking from "./Booking";
 import Earning from "./Earning";
 import Expenses from "./Expenses";
 import PlReport from "./pl report";
@@ -323,6 +323,15 @@ export default function FleetOpzApp() {
   // Initialize fleet data management hook
   const fleetData = useFleetData();
 
+  // Bookings fed into the New/Edit Booking wizard's availability calendars —
+  // excludes the booking currently being edited (if any), so re-opening a
+  // booking for edits doesn't show its own already-booked dates as
+  // unavailable/conflicting with itself. Real conflicts against every OTHER
+  // booking still show normally.
+  const calendarBookings = editingBookingId
+    ? fleetData.bookings.filter(b => b.id !== editingBookingId)
+    : fleetData.bookings;
+
   const [newBookingData, setNewBookingData] = useState({
     plate: "",
     customer: "",
@@ -358,11 +367,16 @@ export default function FleetOpzApp() {
     // excluded from the subtotal/VAT/total math below.
     deliveryCharge: "",
     collectionCharge: "",
+    // Additional Driver Charge — a plain fixed field, same shape as Delivery/
+    // Collection/Other Charges. Only shown once at least one Additional
+    // Driver has been added (see Step 3 below), so adding a driver is what
+    // surfaces this field for staff to fill in.
+    additionalDriverCharge: "",
     otherCharges: "",
-    // Itemized charges added in this step (Late Fee, Damage Fee, Parking
-    // Fine, etc. — same CHARGE_TYPES list the Return screen uses). Each gets
-    // tagged origin: "booking" so computeBookingInvoice bakes it into the
-    // signed Agreement Total, same as the 4 fixed fields above.
+    // Kept only for backward compatibility with bookings that already carry
+    // itemized charges from before this field existed — there's no UI in
+    // this wizard to add to it anymore. computeBookingInvoice (Booking.jsx)
+    // still reads it, e.g. when editing an older booking.
     charges: [],
     additionalDrivers: [], // [{ id, name, license, licenseExpiry, contact }] — optional
     license: "",
@@ -390,42 +404,6 @@ export default function FleetOpzApp() {
     vehicleCondition: "",
   });
   const [attachmentError, setAttachmentError] = useState("");
-
-  // Step 3's "+ Add Charge" mini-form — same shape as BookingDetailModal's
-  // own chargeType/chargeAmount/chargeNote state on the Return screen, kept
-  // separate since this is a different component/modal entirely.
-  const [chargeType, setChargeType] = useState(CHARGE_TYPES[0].value);
-  const [chargeAmount, setChargeAmount] = useState("");
-  const [chargeNote, setChargeNote] = useState("");
-  const selectedChargeType = CHARGE_TYPES.find(t => t.value === chargeType) || CHARGE_TYPES[0];
-
-  // Adds an itemized charge to newBookingData.charges, tagged origin:
-  // "booking" so it's baked into the signed Agreement Total (not just the
-  // Final Invoice) once the booking is created — see computeBookingInvoice.
-  const handleAddBookingCharge = () => {
-    const amt = Number(chargeAmount);
-    if (!chargeAmount || amt <= 0) {
-      alert("Enter a charge amount greater than 0");
-      return;
-    }
-    const newCharge = {
-      id: `${Date.now()}`,
-      type: selectedChargeType.value,
-      label: selectedChargeType.label.replace(" (auto-calculable)", ""),
-      amount: amt,
-      note: chargeNote,
-      taxable: selectedChargeType.taxable,
-      addedAt: new Date().toISOString(),
-      origin: "booking",
-    };
-    setNewBookingData(prev => ({ ...prev, charges: [...(prev.charges || []), newCharge] }));
-    setChargeAmount("");
-    setChargeNote("");
-  };
-
-  const handleRemoveBookingCharge = (id) => {
-    setNewBookingData(prev => ({ ...prev, charges: (prev.charges || []).filter(c => c.id !== id) }));
-  };
 
   // The New Booking modal is now a 2-step wizard: Step 1 is Customer Details
   // (IC-driven auto-fill), Step 2 is Booking Details (unchanged submit logic,
@@ -526,6 +504,15 @@ export default function FleetOpzApp() {
       alert("Pickup Location and Drop Location are required");
       return;
     }
+    // Instant availability check — applies the same way for New and Edit
+    // Booking (excludeBookingId is undefined when creating new, so nothing
+    // is excluded there). Blocks moving on rather than letting staff fill in
+    // Pricing/Payment/Review for a car+date range that's already taken.
+    const conflict = fleetData.checkBookingConflict(newBookingData.plate, newBookingData.start, newBookingData.end, editingBookingId);
+    if (conflict) {
+      alert(buildAvailabilityConflictMessage(conflict, newBookingData.start));
+      return;
+    }
     setBookingStep(3);
   };
 
@@ -602,6 +589,7 @@ export default function FleetOpzApp() {
       vatRate: booking.vatRate ?? "",
       deliveryCharge: booking.deliveryCharge ?? "",
       collectionCharge: booking.collectionCharge ?? "",
+      additionalDriverCharge: booking.additionalDriverCharge ?? "",
       otherCharges: booking.otherCharges ?? "",
       charges: booking.charges || [],
       additionalDrivers: booking.additionalDrivers || [],
@@ -627,10 +615,7 @@ export default function FleetOpzApp() {
     setShowNewBooking(false);
     setBookingStep(1);
     setEditingBookingId(null);
-    setNewBookingData({ plate: "", customer: "", ic: "", contact: "", passport: "", address: "", customerType: "Local", age: "", drivingExperience: "", start: "", end: "", pickupDate: "", pickupTime: "", returnDate: "", returnTime: "", pickup: "", drop: "", rate: "", deductible: "", vatRate: "", deliveryCharge: "", collectionCharge: "", otherCharges: "", charges: [], additionalDrivers: [], license: "", licenseExpiry: "", attachment: null, comments: "", amountCollected: "0", paymentMethod: "Cash", referenceCode: "", amountCollectedDate: new Date().toISOString().slice(0, 10), amountCollectedTime: new Date().toTimeString().slice(0, 5), startingMileage: "", fuelLevel: "", vehicleCondition: "" });
-    setChargeType(CHARGE_TYPES[0].value);
-    setChargeAmount("");
-    setChargeNote("");
+    setNewBookingData({ plate: "", customer: "", ic: "", contact: "", passport: "", address: "", customerType: "Local", age: "", drivingExperience: "", start: "", end: "", pickupDate: "", pickupTime: "", returnDate: "", returnTime: "", pickup: "", drop: "", rate: "", deductible: "", vatRate: "", deliveryCharge: "", collectionCharge: "", additionalDriverCharge: "", otherCharges: "", charges: [], additionalDrivers: [], license: "", licenseExpiry: "", attachment: null, comments: "", amountCollected: "0", paymentMethod: "Cash", referenceCode: "", amountCollectedDate: new Date().toISOString().slice(0, 10), amountCollectedTime: new Date().toTimeString().slice(0, 5), startingMileage: "", fuelLevel: "", vehicleCondition: "" });
     setAttachmentError("");
     setMatchedCustomer(null);
     setCreatedBookingInfo(null);
@@ -1004,6 +989,7 @@ export default function FleetOpzApp() {
   const bookingRateCharge = (Number(newBookingData.rate) || 0) * bookingDays;
   const bookingDeliveryCharge = Number(newBookingData.deliveryCharge) || 0;
   const bookingCollectionCharge = Number(newBookingData.collectionCharge) || 0;
+  const bookingAdditionalDriverCharge = Number(newBookingData.additionalDriverCharge) || 0;
   const bookingOtherCharges = Number(newBookingData.otherCharges) || 0;
   // Security Deposit is refundable, not a rental charge — kept out of the
   // subtotal/VAT/total math and shown only as an informational figure
@@ -1017,7 +1003,7 @@ export default function FleetOpzApp() {
   const bookingCharges = newBookingData.charges || [];
   const bookingChargesTaxableTotal = bookingCharges.filter(c => c.taxable).reduce((s, c) => s + (Number(c.amount) || 0), 0);
   const bookingChargesNonTaxableTotal = bookingCharges.filter(c => !c.taxable).reduce((s, c) => s + (Number(c.amount) || 0), 0);
-  const bookingFixedSubtotal = bookingRateCharge + bookingDeliveryCharge + bookingCollectionCharge + bookingOtherCharges;
+  const bookingFixedSubtotal = bookingRateCharge + bookingDeliveryCharge + bookingCollectionCharge + bookingAdditionalDriverCharge + bookingOtherCharges;
   const bookingTaxableBase = bookingFixedSubtotal + bookingChargesTaxableTotal;
   const bookingSubtotal = bookingFixedSubtotal + bookingChargesTaxableTotal + bookingChargesNonTaxableTotal;
   const bookingVatAmount = bookingTaxableBase * (bookingVatRatePct / 100);
@@ -1358,7 +1344,7 @@ export default function FleetOpzApp() {
                       <SingleDateCalendar
                         label="Pickup Date"
                         car={fleetData.fleet.find(c => c.plate === newBookingData.plate)}
-                        bookings={fleetData.bookings}
+                        bookings={calendarBookings}
                         selectedDate={newBookingData.pickupDate}
                         onSelect={(iso) => {
                           setNewBookingData(prev => {
@@ -1381,7 +1367,7 @@ export default function FleetOpzApp() {
                       <SingleDateCalendar
                         label="Return Date"
                         car={fleetData.fleet.find(c => c.plate === newBookingData.plate)}
-                        bookings={fleetData.bookings}
+                        bookings={calendarBookings}
                         selectedDate={newBookingData.returnDate}
                         minDate={newBookingData.pickupDate}
                         onSelect={(iso) => {
@@ -1399,6 +1385,23 @@ export default function FleetOpzApp() {
                   ) : (
                     <div style={{ fontSize: 12, color: C.textMuted, padding: "10px 0" }}>Select a car above to see its availability and pick rental dates.</div>
                   )}
+
+                  {/* Instant availability check — re-evaluates on every
+                      render, so it reacts immediately to a plate or date
+                      change rather than waiting for Next/Submit. excludeBookingId
+                      is editingBookingId (undefined when creating new), so a
+                      booking never conflicts with its own current dates. */}
+                  {(() => {
+                    if (!newBookingData.plate || !newBookingData.start || !newBookingData.end) return null;
+                    if (new Date(newBookingData.end) <= new Date(newBookingData.start)) return null;
+                    const conflict = fleetData.checkBookingConflict(newBookingData.plate, newBookingData.start, newBookingData.end, editingBookingId);
+                    if (!conflict) return null;
+                    return (
+                      <div style={{ marginTop: 12, padding: "10px 12px", borderRadius: 8, border: `1px solid ${C.red}55`, background: `${C.red}0f`, fontSize: 11.5, color: C.red, fontWeight: 600 }}>
+                        ⚠️ {buildAvailabilityConflictMessage(conflict, newBookingData.start)}
+                      </div>
+                    );
+                  })()}
 
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 14 }}>
                     <div>
@@ -1452,8 +1455,9 @@ export default function FleetOpzApp() {
 
                   {/* Additional Drivers — optional, one or more people besides the
                       main customer who are permitted to drive during this rental.
-                      Any per-driver fee is a separate manual line (Step 3's
-                      Additional Driver Charge) — not tied to how many are listed here. */}
+                      Adding at least one driver here surfaces the Additional
+                      Driver Charge field further down in Step 3 (Pricing &
+                      Charges) — a single manual fee amount, not per-driver. */}
                   <div style={{ marginTop: 18, marginBottom: 14 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                       <div style={{ fontSize: 13, fontWeight: 700, color: C.navy }}>🧑‍🤝‍🧑 Additional Drivers <span style={{ fontWeight: 400, color: C.textMuted, fontSize: 11 }}>(optional)</span></div>
@@ -1475,7 +1479,16 @@ export default function FleetOpzApp() {
                           <div style={{ fontSize: 11.5, fontWeight: 700, color: C.textSec }}>Driver {idx + 1}</div>
                           <button
                             type="button"
-                            onClick={() => setNewBookingData({ ...newBookingData, additionalDrivers: newBookingData.additionalDrivers.filter(d => d.id !== driver.id) })}
+                            onClick={() => {
+                              const remaining = newBookingData.additionalDrivers.filter(d => d.id !== driver.id);
+                              setNewBookingData({
+                                ...newBookingData,
+                                additionalDrivers: remaining,
+                                // No drivers left — clear the charge too, since
+                                // the field itself disappears below.
+                                additionalDriverCharge: remaining.length === 0 ? "" : newBookingData.additionalDriverCharge,
+                              });
+                            }}
                             style={{ fontSize: 10.5, fontWeight: 600, color: C.red, background: "none", border: "none", cursor: "pointer" }}
                           >
                             Remove
@@ -1592,7 +1605,7 @@ export default function FleetOpzApp() {
                 </>
               ) : bookingStep === 3 ? (
                 <>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: C.navy, marginBottom: 16 }}>🧾 Itemized Charges</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: C.navy, marginBottom: 16 }}>🧾 Pricing & Charges</div>
 
                   <div style={{ marginBottom: 14 }}>
                     <label style={bookingFieldLabelStyle}>Rate Charge (Daily, {bookingDays} day{bookingDays === 1 ? "" : "s"}) — auto</label>
@@ -1628,6 +1641,25 @@ export default function FleetOpzApp() {
                         style={bookingFieldInputStyle(false)}
                       />
                     </div>
+                    {/* Only shown once at least one Additional Driver has been
+                        added in Step 2 — adding a driver is what surfaces
+                        this field, since there's no charge to enter otherwise. */}
+                    {newBookingData.additionalDrivers.length > 0 && (
+                      <div>
+                        <label style={bookingFieldLabelStyle}>Additional Driver Charge</label>
+                        <input
+                          type="number" min="0"
+                          value={newBookingData.additionalDriverCharge}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            if (v !== "" && Number(v) < 0) return;
+                            setNewBookingData({ ...newBookingData, additionalDriverCharge: v });
+                          }}
+                          placeholder="0"
+                          style={bookingFieldInputStyle(false)}
+                        />
+                      </div>
+                    )}
                     <div>
                       <label style={bookingFieldLabelStyle}>Other Charges</label>
                       <input
@@ -1643,60 +1675,6 @@ export default function FleetOpzApp() {
                       />
                     </div>
                   </div>
-
-                  {/* Itemized charges — same design/interaction as the Return
-                      screen's Charges & Payment tab. Anything added here is
-                      part of the signed agreement (baked into Grand Total
-                      below), unlike charges added later after return. */}
-                  <div style={{ fontSize: 11.5, color: C.textMuted, marginBottom: 14 }}>
-                    Itemized charges added here are part of the signed Agreement — they're included in the Grand Total below.
-                  </div>
-
-                  <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px 18px", marginBottom: 16 }}>
-                    <div style={{ fontSize: 12.5, fontWeight: 700, color: C.navy, marginBottom: 12 }}>+ Add Additional Driver Charge</div>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 12, alignItems: "end", marginBottom: 10 }}>
-                      <div>
-                        <label style={bookingFieldLabelStyle}>Charge Type</label>
-                        <select value={chargeType} onChange={(e) => setChargeType(e.target.value)} style={bookingFieldInputStyle(false)}>
-                          {CHARGE_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <label style={bookingFieldLabelStyle}>Amount</label>
-                        <input type="number" min="0" value={chargeAmount} onChange={(e) => setChargeAmount(e.target.value)} placeholder="0.00" style={bookingFieldInputStyle(false)} />
-                      </div>
-                      <Btn primary onClick={handleAddBookingCharge}>+ Add</Btn>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "end", gap: 12 }}>
-                      <div style={{ flex: 1 }}>
-                        <label style={bookingFieldLabelStyle}>Note (optional)</label>
-                        <input type="text" value={chargeNote} onChange={(e) => setChargeNote(e.target.value)} placeholder="e.g., 2 hours late, or fine reference #" style={bookingFieldInputStyle(false)} />
-                      </div>
-                      <div style={{ fontSize: 11, color: C.textMuted, whiteSpace: "nowrap", paddingBottom: 8 }}>
-                        {selectedChargeType.taxable ? "Taxable — VAT applies" : "Non-Taxable"}
-                      </div>
-                    </div>
-                  </div>
-
-                  {bookingCharges.length > 0 && (
-                    <div style={{ marginBottom: 16 }}>
-                      {bookingCharges.map(c => (
-                        <div key={c.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 16px", marginBottom: 10 }}>
-                          <div>
-                            <div style={{ fontSize: 12.5, fontWeight: 600, color: C.navy, display: "flex", alignItems: "center", gap: 8 }}>
-                              {c.label} — {formatSGD(Number(c.amount) || 0)}
-                              <span style={{
-                                fontSize: 9.5, fontWeight: 700, padding: "2px 7px", borderRadius: 999,
-                                background: C.bg, color: c.taxable ? C.navy : C.textMuted, border: `1px solid ${C.border}`,
-                              }}>{c.taxable ? "Taxable" : "Non-Taxable"}</span>
-                            </div>
-                            {c.note && <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>{c.note}</div>}
-                          </div>
-                          <button onClick={() => handleRemoveBookingCharge(c.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 15 }} aria-label="Remove charge">🗑</button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
 
                   <div style={{ marginBottom: 14 }}>
                     <label style={bookingFieldLabelStyle}>Security Deposit (refundable — not a rental charge)</label>
@@ -1738,17 +1716,12 @@ export default function FleetOpzApp() {
                       { label: "Rental Vehicle Charge", value: bookingRateCharge },
                       { label: "Delivery Charge", value: bookingDeliveryCharge },
                       { label: "Collection Charge", value: bookingCollectionCharge },
+                      { label: "Additional Driver Charge", value: bookingAdditionalDriverCharge },
                       { label: "Other Charges", value: bookingOtherCharges },
                     ].filter(row => row.value > 0 || row.label === "Rental Vehicle Charge").map(row => (
                       <div key={row.label} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 12.5, color: C.textSec }}>
                         <span>{row.label}</span>
                         <span style={mono}>{formatSGD(row.value)}</span>
-                      </div>
-                    ))}
-                    {bookingCharges.map(c => (
-                      <div key={c.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 12.5, color: C.textSec }}>
-                        <span>{c.label}</span>
-                        <span style={mono}>{formatSGD(Number(c.amount) || 0)}</span>
                       </div>
                     ))}
                     <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", marginTop: 4, paddingTop: 10, borderTop: `1px solid ${C.border}`, fontSize: 12.5, color: C.textSec }}>
@@ -1789,7 +1762,7 @@ export default function FleetOpzApp() {
                     <>
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
                         <div>
-                          <label style={bookingFieldLabelStyle}>Advance</label>
+                          <label style={bookingFieldLabelStyle}>Rental Amount</label>
                           <input
                             type="number"
                             min="0"
@@ -1837,12 +1810,12 @@ export default function FleetOpzApp() {
                       </div>
 
                       <div style={{ marginBottom: 20 }}>
-                        <label style={bookingFieldLabelStyle}>Reference / Auth Code</label>
+                        <label style={bookingFieldLabelStyle}>Transaction ID</label>
                         <input
                           type="text"
                           value={newBookingData.referenceCode}
                           onChange={(e) => setNewBookingData({ ...newBookingData, referenceCode: e.target.value })}
-                          placeholder="Optional — transaction/auth reference"
+                          placeholder="Optional — Transaction ID/ Payment reference"
                           style={bookingFieldInputStyle(false)}
                         />
                       </div>
@@ -1908,7 +1881,7 @@ export default function FleetOpzApp() {
                               <span style={mono}>{formatSGD(bookingTotal)}</span>
                             </div>
                             <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 12.5, color: C.textSec }}>
-                              <span>Advance</span>
+                              <span>Rental Amount</span>
                               <span style={mono}>{formatSGD(bookingAmountCollected)}</span>
                             </div>
                             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>

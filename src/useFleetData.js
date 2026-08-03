@@ -118,7 +118,10 @@ export const computeBookingInvoice = (b) => {
     ? [{ id: "seed", amount: Number(b.amountCollected), method: b.paymentMethod || "Cash", reference: b.referenceCode || "", addedAt: b.createdAt || null }]
     : []);
   const totalPaid = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
-  const balanceDue = finalInvoiceTotal - totalPaid;
+  // Balance Due must never go negative — once payments (including any Fuel
+  // Charge folded into finalInvoiceTotal above) cover the invoice in full, it
+  // stops at 0. Kept in sync with Booking.jsx's copy of this same clamp.
+  const balanceDue = Math.max(0, finalInvoiceTotal - totalPaid);
 
   return {
     days, rateCharge, deliveryCharge, collectionCharge, additionalDriverCharge, otherCharges, deposit, vatPct,
@@ -147,11 +150,18 @@ export const isBookingClosedOut = (status) => status === "Completed" || status =
 // date X" (not just today) can reuse this exact logic — e.g. the Booking
 // module's forward-looking availability timeline calls this once per day.
 //
-// Reaching a completed state still works exactly as before (return date
-// passed, or staff force-completed/confirmed the return) — that part is
-// unchanged. What's new: a completed booking advances one step further, from
-// "Completed" to "Closed", once it's fully paid (including any charges added
-// after return). Any pending balance keeps it sitting in "Completed".
+// Full lifecycle: Upcoming -> Vehicle Handover -> Active -> Completed -> Closed.
+// A completed state is only ever reached through an actual Vehicle Return
+// (booking.forceCompleted — set by Booking.jsx's "Confirm Return & Generate
+// Invoice" action, or the manual "Mark Done" override), which is also the
+// moment an invoice gets generated. The clock alone (todayStr passing endStr)
+// never promotes a booking to Completed/Closed on its own — a booking whose
+// return date has passed but hasn't actually been returned yet just stays
+// "Ending Today" until staff act on it, so "Completed" always genuinely means
+// "vehicle returned + invoice generated", never "we stopped tracking it".
+// From there, a completed booking advances one step further, from
+// "Completed" to "Closed", once it's fully paid (including any Fuel Charge or
+// other charge added after return) — any pending balance keeps it in "Completed".
 export const computeBookingStatus = (booking, todayStr) => {
   if (booking.cancelled) return "Cancelled";
 
@@ -160,14 +170,30 @@ export const computeBookingStatus = (booking, todayStr) => {
     return balanceDue <= 0 ? "Closed" : "Completed";
   };
 
+  // forceCompleted is the one true "this booking is done" signal — it's only
+  // ever set alongside an actual return (Confirm Return, or Mark Done as its
+  // manual equivalent) — so it always wins, regardless of dates.
   if (booking.forceCompleted) return resolveCompletion();
   if (!booking.start || !booking.end) return booking.status || "Active";
+
   const startStr = toDateStr(booking.start);
   const endStr = toDateStr(booking.end);
   if (todayStr < startStr) return "Upcoming";
+
+  // Pickup day has arrived (or even passed) but Vehicle Handover — capturing
+  // Starting Odometer, Starting Fuel, and Vehicle Condition — hasn't happened
+  // yet. Per the required lifecycle, a booking can't become Active without
+  // Handover actually completing, so it stays "Upcoming" (Booking.jsx's
+  // "⏳ Awaiting Handover" flag surfaces this to staff) instead of silently
+  // reporting Active with no Starting Mileage/Fuel/Condition on file.
+  if (!booking.handoverAt) return "Upcoming";
+
   if (todayStr === endStr) return "Ending Today";
-  if (todayStr > endStr) return resolveCompletion();
-  return "Active"; // start <= today < end
+  // Past the return date without an actual Vehicle Return recorded — stays
+  // visibly "Ending Today" (overdue) rather than completing itself off a
+  // date alone; Completed must be earned by a real return (see forceCompleted above).
+  if (todayStr > endStr) return "Ending Today";
+  return "Active"; // handed over, start <= today < end
 };
 
 // A car's status is fully derived — Maintenance is the one state that can't

@@ -6,9 +6,9 @@ import { STATUS_PILL_COLORS, STATUS_PILL_FAINT } from "./Fleet";
 // Booking-status colors for the status filter pills below — reuses Fleet's
 // STATUS_PILL_COLORS/STATUS_PILL_FAINT (Upcoming, Ending Today, etc. already
 // match 1:1) and adds the two booking-only statuses Fleet doesn't have.
-const BOOKING_STATUS_COLORS = { ...STATUS_PILL_COLORS, Active: C.teal, Completed: C.green };
+const BOOKING_STATUS_COLORS = { ...STATUS_PILL_COLORS, Active: C.teal, Completed: C.green, Closed: C.navy };
 const getBookingStatusPillColor = (status) => BOOKING_STATUS_COLORS[status] || C.navy;
-import { computeCarAvailabilityTimeline } from "./useFleetData";
+import { computeCarAvailabilityTimeline, isBookingClosedOut } from "./useFleetData";
 import { generateInvoicePdf } from "./invoicePdf";
 import { generateRentalAgreementPdf } from "./rentalAgreement";
 
@@ -99,15 +99,16 @@ const hasHandedOver = (b) => !!b.handoverAt;
 // happened — used to surface an "Awaiting Handover" flag so staff notice
 // the status pill already reads Active even though the rental hasn't
 // actually been handed over (no Agreement, no mileage/fuel on file yet).
-const isAwaitingHandover = (b) => !hasHandedOver(b) && b.start && new Date() >= new Date(b.start) && b.status !== "Completed";
+const isAwaitingHandover = (b) => !hasHandedOver(b) && b.start && new Date() >= new Date(b.start) && !isBookingClosedOut(b.status);
 
-// Charge types offered in the New Booking wizard's "+ Add Charge" form
-// (FleetOpzApp.jsx, Pricing & Charges step) — imported from there via this
-// export. `taxable` drives both the Taxable/Non-Taxable badge and which VAT
-// bucket the charge falls into in the invoice summary — matching the
-// reference design (Parking Fine = Non-Taxable, Late Return Fee = Taxable, etc).
+// Charge types for itemized post-return charges (Pricing & Payment tab's
+// Additional Charges — origin: "return" in computeBookingInvoice below).
+// Not currently used by the New Booking wizard (FleetOpzApp.jsx), which only
+// has the 4 plain fixed charge fields (Delivery/Collection/Additional
+// Driver/Other). `taxable` drives both the Taxable/Non-Taxable badge and
+// which VAT bucket the charge falls into in the invoice summary — matching
+// the reference design (Parking Fine = Non-Taxable, Fuel Shortfall = Taxable, etc).
 export const CHARGE_TYPES = [
-  { value: "late_return_fee", label: "Late Return Fee (auto-calculable)", taxable: true },
   { value: "fuel_shortfall", label: "Fuel Shortfall", taxable: true },
   { value: "damage_fee", label: "Damage Fee", taxable: true },
   { value: "cleaning_fee", label: "Cleaning Fee", taxable: true },
@@ -302,7 +303,7 @@ const buildBookingActivityLog = (booking, inv) => {
   if (booking.returnedAt) {
     events.push({ type: "returned", at: booking.returnedAt, by: actor });
   }
-  if (booking.status === "Completed") {
+  if (isBookingClosedOut(booking.status)) {
     events.push({ type: "completed", at: booking.completedAt || booking.returnedAt || booking.createdAt, by: actor });
   }
 
@@ -362,6 +363,11 @@ const BookingActivityTimeline = ({ booking, inv }) => {
 const BookingDetailModal = ({ booking, bookings, fleet, activeTab, setActiveTab, onClose, onUpdateBooking, onEditBooking }) => {
   const [mileageIn, setMileageIn] = useState(booking.mileageIn || "");
   const [fuelIn, setFuelIn] = useState(booking.fuelIn || "Full");
+  // Fuel Charge is entered manually by staff at return time — there's no
+  // fuel-price/tank-size field in the fleet data model to derive a rate
+  // from, so this is a plain amount field, same as any other post-return
+  // charge amount (Damage Fee, Cleaning Fee, etc).
+  const [fuelCharge, setFuelCharge] = useState("");
   // Defaults to right now (still fully editable) so an on-time return needs
   // no changes, but an early or late return can be corrected before confirming.
   const [actualReturnDate, setActualReturnDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -378,7 +384,7 @@ const BookingDetailModal = ({ booking, bookings, fleet, activeTab, setActiveTab,
   const car = fleet.find(c => c.plate === booking.plate);
   const inv = computeBookingInvoice(booking);
   const payStatus = paymentStatus(inv.totalPaid, inv.finalInvoiceTotal);
-  const alreadyReturned = !!booking.mileageIn || booking.status === "Completed";
+  const alreadyReturned = !!booking.mileageIn || isBookingClosedOut(booking.status);
 
   // Balance Due coloring, per spec: green once fully paid, orange while
   // partially paid, red while nothing's been paid against an outstanding balance.
@@ -393,7 +399,30 @@ const BookingDetailModal = ({ booking, bookings, fleet, activeTab, setActiveTab,
       alert("Enter the Actual Return Date & Time");
       return;
     }
+    if (fuelCharge !== "" && Number(fuelCharge) < 0) {
+      alert("Fuel Charge cannot be negative");
+      return;
+    }
     const actualReturnAt = `${actualReturnDate}T${actualReturnTime}`;
+
+    // Fuel Charge is whatever amount staff entered above (comparing Starting
+    // Fuel at Handover against the Ending Fuel just entered is on them — no
+    // rate is assumed here). Added as an itemized, taxable "return" charge —
+    // same shape as any other post-return charge (see CHARGE_TYPES), so it
+    // flows into finalInvoiceTotal/balanceDue through computeBookingInvoice
+    // automatically rather than needing separate math anywhere else in the app.
+    const fuelChargeAmount = Number(fuelCharge) || 0;
+    const charges = fuelChargeAmount > 0
+      ? [...(booking.charges || []), {
+          id: `fuel-${Date.now()}`,
+          type: "fuel_shortfall",
+          label: `Fuel Charge (${booking.fuelLevel || "?"} -> ${fuelIn})`,
+          amount: fuelChargeAmount,
+          taxable: true,
+          origin: "return",
+          addedAt: new Date().toISOString(),
+        }]
+      : (booking.charges || []);
 
     // forceCompleted mirrors the existing "Mark Done" convention elsewhere in
     // this file, rather than setting status directly — that keeps this in
@@ -401,15 +430,16 @@ const BookingDetailModal = ({ booking, bookings, fleet, activeTab, setActiveTab,
     // owns booking status. The car goes straight to Available once this
     // fires — useFleetData.js no longer has any automatic Maintenance path.
     onUpdateBooking(booking.id, {
-      mileageIn, fuelIn, actualReturnAt,
+      mileageIn, fuelIn, actualReturnAt, charges,
       forceCompleted: true,
       returnedAt: new Date().toISOString(),
     });
 
     // onUpdateBooking's state update isn't synchronous, so build the
     // post-return booking locally to invoice off the actual return date
-    // immediately rather than waiting a render behind.
-    const returnedBooking = { ...booking, mileageIn, fuelIn, actualReturnAt };
+    // (and the Fuel Charge just computed) immediately rather than waiting a
+    // render behind.
+    const returnedBooking = { ...booking, mileageIn, fuelIn, actualReturnAt, charges };
     const finalInv = computeBookingInvoice(returnedBooking);
     generateInvoicePdf(returnedBooking, car, finalInv);
   };
@@ -581,7 +611,7 @@ const BookingDetailModal = ({ booking, bookings, fleet, activeTab, setActiveTab,
                   <span style={{ color: C.textMuted }}>Vehicle Handover</span>
                   {hasHandedOver(booking) ? (
                     <span style={{ color: C.navy, fontWeight: 600, textAlign: "right" }}>✅ {formatDateTime(booking.handoverAt)}</span>
-                  ) : booking.status !== "Completed" ? (
+                  ) : !isBookingClosedOut(booking.status) ? (
                     <span style={{ color: "#92400e", fontWeight: 600, textAlign: "right", fontSize: 11 }}>⏳ Complete via Edit</span>
                   ) : (
                     <span style={{ color: C.navy, fontWeight: 600, textAlign: "right" }}>⏳ Pending</span>
@@ -658,6 +688,10 @@ const BookingDetailModal = ({ booking, bookings, fleet, activeTab, setActiveTab,
                 {alreadyReturned ? (
                   <div style={{ fontSize: 12.5, color: C.textSec }}>
                     ✅ Returned{booking.actualReturnAt ? ` ${new Date(booking.actualReturnAt).toLocaleString()}` : ""} — Mileage In {booking.mileageIn || mileageIn} km · Fuel In {booking.fuelIn || fuelIn}
+                    {(() => {
+                      const recordedFuelCharge = (booking.charges || []).find(c => c.type === "fuel_shortfall");
+                      return recordedFuelCharge ? ` · Fuel Charge ${fmt(Number(recordedFuelCharge.amount) || 0)}` : "";
+                    })()}
                   </div>
                 ) : (
                   <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
@@ -679,13 +713,27 @@ const BookingDetailModal = ({ booking, bookings, fleet, activeTab, setActiveTab,
                         {FUEL_LEVELS.map(f => <option key={f} value={f}>{f}</option>)}
                       </select>
                     </div>
+                    <div style={{ flex: "1 1 160px" }}>
+                      <div style={detailFieldLabelStyle}>Fuel Charge</div>
+                      <input
+                        type="number"
+                        min="0"
+                        value={fuelCharge}
+                        onChange={(e) => setFuelCharge(e.target.value)}
+                        placeholder="0.00"
+                        style={detailInputStyle}
+                      />
+                    </div>
                     <Btn primary onClick={handleConfirmReturn}>Confirm Return & Generate Invoice</Btn>
+                    <div style={{ flex: "1 1 100%", fontSize: 11, color: C.textMuted }}>
+                      Starting Fuel (at Handover): <strong style={{ color: C.navy }}>{booking.fuelLevel || "—"}</strong> · compare against Fuel In above to decide the Fuel Charge. Any amount entered here is added to the invoice and Balance Due on confirm.
+                    </div>
                   </div>
                 )}
               </div>
 
-              {/* Completion Summary — full financial close-out, shown only once the rental is done */}
-              {booking.status === "Completed" && (
+              {/* Completion Summary — full financial close-out, shown once the rental is done (Completed or its fully-paid successor, Closed) */}
+              {isBookingClosedOut(booking.status) && (
                 <div style={{ gridColumn: "1 / -1", border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 14px", background: C.bg }}>
                   <SectionHeading size="sm">Completion Summary</SectionHeading>
                   {[
@@ -890,7 +938,7 @@ const Booking = ({ bookings = [], fleet = [], onNewBooking, onAddBooking, onUpda
     prevCountRef.current = bookings.length;
   }, [bookings.length]);
 
-  const statuses = ["All", "Active", "Upcoming", "Ending Today", "Completed"];
+  const statuses = ["All", "Active", "Upcoming", "Ending Today", "Completed", "Closed"];
 
   // Topbar Car / Month filters (FleetOpzApp header) scope the whole page —
   // status pills and counts below are computed from this scoped set, so
@@ -932,8 +980,11 @@ const Booking = ({ bookings = [], fleet = [], onNewBooking, onAddBooking, onUpda
   // longer makes sense in the real world, so "Mark Active" only appears in
   // the brief window before that's happened.
   const handleToggleComplete = (b) => {
-    if (b.status === "Completed") {
-      if (b.maintenanceTriggered) return; // car's already gone to Maintenance — no undo
+    if (isBookingClosedOut(b.status)) {
+      // Once fully paid (Closed) or already released to Maintenance, this is
+      // a one-way door — reverting would skip the lifecycle backwards, which
+      // the workflow never allows.
+      if (b.status === "Closed" || b.maintenanceTriggered) return;
       onUpdateBooking(b.id, { forceCompleted: false });
     } else {
       onUpdateBooking(b.id, { forceCompleted: true });
