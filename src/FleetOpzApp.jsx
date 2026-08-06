@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { C } from "./theme";
 import { Btn, Badge, Modal, Input, Select, StatusTag } from "./components";
 import { useFleetData, buildAvailabilityConflictMessage, findCustomerByIC, computeCarAvailabilityTimeline } from "./useFleetData";
+
 
 import AddCarWizard from "./AddCarWizard";
 import { generateRentalAgreementPdf } from "./rentalAgreement";
@@ -13,7 +14,7 @@ import Earning from "./Earning";
 import Expenses from "./Expenses";
 import PlReport from "./pl report";
 import Alert from "./Alert";
-import Settings from "./Settings";
+import UserManagement from "./UserManagement";
 
 // Shared styling for the New Booking wizard's Step 1 (Customer Details)
 // fields. These are plain <input>s rather than the shared <Input> component
@@ -320,8 +321,156 @@ export default function FleetOpzApp() {
     setRestrictedLicenses(prev => prev.filter(r => r.id !== id));
   };
 
+  // System users shown on the User Management screen. Lifted up here (same
+  // pattern as restrictedLicenses above) so it's easy to wire into real auth
+  // later without moving state around again. Permissions are NOT stored per
+  // user — they live in rolePermissions below and are looked up by u.role.
+  const [users, setUsers] = useState([
+    { id: 1, name: "Administrator", email: "admin@fleetopz.com", role: "Admin", status: "Active", lastLogin: "15/08/2026 10:30 AM", isYou: true },
+    { id: 2, name: "Ramesh Kumar", email: "ramesh@fleetopz.com", role: "Staff", status: "Active", lastLogin: "15/08/2026 09:15 AM" },
+    { id: 3, name: "Sunitha", email: "sunitha@fleetopz.com", role: "Staff", status: "Inactive", lastLogin: "12/08/2026 04:45 PM" },
+    { id: 4, name: "Manoj", email: "manoj@fleetopz.com", role: "Staff", status: "Active", lastLogin: "15/08/2026 08:20 AM" },
+  ]);
+  const addUser = (u) => setUsers(prev => [...prev, { id: Date.now(), status: "Active", lastLogin: "—", ...u }]);
+  const updateUser = (id, updates) => setUsers(prev => prev.map(u => u.id === id ? { ...u, ...updates } : u));
+  const deleteUser = (id) => setUsers(prev => prev.filter(u => u.id !== id));
+
+  // Role-based permissions — one shared permission grid per role rather
+  // than per user. Editing a role here (via the Role & Permission tab)
+  // applies to every user currently assigned that role.
+  const [rolePermissions, setRolePermissions] = useState({
+    Admin: { Dashboard: { view: true, create: true, edit: true, delete: true }, Fleet: { view: true, create: true, edit: true, delete: true }, Bookings: { view: true, create: true, edit: true, delete: true }, Earnings: { view: true, create: true, edit: true, delete: true }, Expenses: { view: true, create: true, edit: true, delete: true }, "P&L": { view: true, create: true, edit: true, delete: true }, Alerts: { view: true, create: true, edit: true, delete: true } },
+    Staff: { Dashboard: { view: true, create: false, edit: false, delete: false }, Fleet: { view: true, create: false, edit: false, delete: false }, Bookings: { view: true, create: true, edit: true, delete: false }, Earnings: { view: false, create: false, edit: false, delete: false }, Expenses: { view: true, create: true, edit: false, delete: false }, "P&L": { view: false, create: false, edit: false, delete: false }, Alerts: { view: true, create: false, edit: false, delete: false } },
+  });
+  const toggleRolePermission = (role, module, action) => {
+    setRolePermissions(prev => ({
+      ...prev,
+      [role]: {
+        ...prev[role],
+        [module]: { ...prev[role]?.[module], [action]: !prev[role]?.[module]?.[action] },
+      },
+    }));
+  };
+
   // Initialize fleet data management hook
   const fleetData = useFleetData();
+
+  // ── Topbar: notifications + profile dropdown ────────────────────────────
+  const [notifMenuOpen, setNotifMenuOpen] = useState(false);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const notifMenuRef = useRef(null);
+  const profileMenuRef = useRef(null);
+
+  // Close either dropdown when clicking anywhere outside of it.
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (notifMenuRef.current && !notifMenuRef.current.contains(e.target)) setNotifMenuOpen(false);
+      if (profileMenuRef.current && !profileMenuRef.current.contains(e.target)) setProfileMenuOpen(false);
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // Search box shown in the topbar while on the User Management screen —
+  // filters the users list passed down to it.
+  const [userTopbarSearch, setUserTopbarSearch] = useState("");
+
+  // Company Profile — opened from the profile dropdown. Persisted the same
+  // way as the rest of the app's data (localStorage via useFleetData's
+  // loadPersisted/savePersisted helpers), so it survives refreshes too.
+  const [showCompanyProfileModal, setShowCompanyProfileModal] = useState(false);
+  const [companyProfileEditing, setCompanyProfileEditing] = useState(false);
+  const [companyProfile, setCompanyProfile] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem("fleetopz:companyProfile");
+      if (raw) return JSON.parse(raw);
+    } catch (_) { /* fall through to default */ }
+    return {
+      name: "FleetOpz Car Rental",
+      logo: "",
+      email: "info@fleetopz.com",
+      phone: "+65 9123 4567",
+      address: "Blk 20 Clementi Avenue 3, #05-12, Singapore 129905",
+      currency: "SGD (Singapore Dollar)",
+      timezone: "(GMT+08:00) Singapore",
+      gstNumber: "20-1234567-K",
+      businessRegNumber: "202012345K",
+      dateFormat: "DD/MM/YYYY",
+    };
+  });
+  const [companyProfileDraft, setCompanyProfileDraft] = useState(companyProfile);
+  const openCompanyProfile = () => { setCompanyProfileDraft(companyProfile); setCompanyProfileEditing(false); setShowCompanyProfileModal(true); setProfileMenuOpen(false); };
+  const saveCompanyProfile = () => {
+    setCompanyProfile(companyProfileDraft);
+    try { window.localStorage.setItem("fleetopz:companyProfile", JSON.stringify(companyProfileDraft)); } catch (_) {}
+    setCompanyProfileEditing(false);
+  };
+  const handleLogoChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setCompanyProfileDraft(prev => ({ ...prev, logo: reader.result }));
+    reader.readAsDataURL(file);
+  };
+
+  // Settings — opened from the profile dropdown. Backed by fleetData's
+  // notificationSettings / systemPreferences (persisted, and actually wired
+  // into generateAlerts()) — this modal edits drafts of both, saved per
+  // section via the two "Save Changes" buttons in the mockup.
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [notifDraft, setNotifDraft] = useState(fleetData.notificationSettings);
+  const [prefsDraft, setPrefsDraft] = useState(fleetData.systemPreferences);
+  const openSettings = () => {
+    setNotifDraft(fleetData.notificationSettings);
+    setPrefsDraft(fleetData.systemPreferences);
+    setShowSettingsModal(true);
+    setProfileMenuOpen(false);
+  };
+  const saveNotificationDraft = () => {
+    fleetData.updateNotificationSettings("email", notifDraft.email);
+    fleetData.updateNotificationSettings("system", notifDraft.system);
+    fleetData.updateNotificationSettings("reminders", notifDraft.reminders);
+  };
+  const savePreferencesDraft = () => {
+    fleetData.updateSystemPreferences("general", prefsDraft.general);
+    fleetData.updateSystemPreferences("bookingDefaults", prefsDraft.bookingDefaults);
+    fleetData.updateSystemPreferences("customerSettings", prefsDraft.customerSettings);
+    fleetData.updateSystemPreferences("fleetSettings", prefsDraft.fleetSettings);
+  };
+
+  // Change Password — opened from the profile dropdown.
+  const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({ current: "", next: "", confirm: "" });
+  const openChangePassword = () => { setPasswordForm({ current: "", next: "", confirm: "" }); setShowChangePasswordModal(true); setProfileMenuOpen(false); };
+  const submitChangePassword = () => {
+    if (!passwordForm.current.trim() || !passwordForm.next.trim() || !passwordForm.confirm.trim()) {
+      alert("Please fill in all password fields.");
+      return;
+    }
+    if (passwordForm.next.length < 6) {
+      alert("New password must be at least 6 characters.");
+      return;
+    }
+    if (passwordForm.next !== passwordForm.confirm) {
+      alert("New password and confirmation do not match.");
+      return;
+    }
+    alert("Password updated successfully.");
+    setPasswordForm({ current: "", next: "", confirm: "" });
+    setShowChangePasswordModal(false);
+  };
+
+  // Logout — uses the app's real auth (AuthContext). Confirming clears the
+  // saved token/user via logout(), and main.jsx's existing user-check
+  // automatically swaps back to the Login screen once `user` becomes null —
+  // no separate placeholder screen needed here.
+ 
+  const handleLogout = () => {
+    setProfileMenuOpen(false);
+    if (window.confirm("Log out of FleetOpz?")) {
+      logout();
+    }
+  };
 
   // Bookings fed into the New/Edit Booking wizard's availability calendars —
   // excludes the booking currently being edited (if any), so re-opening a
@@ -635,7 +784,7 @@ export default function FleetOpzApp() {
     { id: "expenses", label: "Expenses", icon: "📝" },
     { id: "pl", label: "P&L", icon: "📈" },
     { id: "alerts", label: "Alerts", icon: "🔔", badge: fleetData.alerts.length },
-    { id: "settings", label: "Settings", icon: "⚙️" },
+    { id: "userManagement", label: "User Management", icon: "👤" },
   ];
 
   const TAB_CONTENT = {
@@ -681,6 +830,8 @@ export default function FleetOpzApp() {
         onEditBooking={openEditBookingModal}
         selectedCar={selectedCar}
         selectedRange={selectedRange}
+        onPaymentReceived={(entry) => { if (fleetData.notificationSettings.email.paymentReceived) fleetData.addManualAlert(entry); }}
+        onBookingCancelled={(entry) => { if (fleetData.notificationSettings.email.bookingCancellation) fleetData.addManualAlert(entry); }}
       />
     ),
     earnings: (
@@ -718,16 +869,21 @@ export default function FleetOpzApp() {
       <Alert
         alerts={fleetData.alerts}
         fleet={fleetData.fleet}
+        onMarkRead={fleetData.markAlertRead}
+        onMarkAllRead={fleetData.markAllAlertsRead}
+        onNavigate={(screenLabel) => setActive(NAV.find(n => n.label === screenLabel)?.id || "dashboard")}
+        onOpenSettings={openSettings}
       />
     ),
-    settings: (
-      <Settings
-        onAddUser={() => setShowNewUser(true)}
+    userManagement: (
+      <UserManagement
+        users={users}
+        onAddUser={addUser}
+        onUpdateUser={updateUser}
+        onDeleteUser={deleteUser}
         currentUserRole={currentUserRole}
-        restrictedLicenses={restrictedLicenses}
-        onAddRestrictedLicense={addRestrictedLicense}
-        onUpdateRestrictedLicense={updateRestrictedLicense}
-        onDeleteRestrictedLicense={deleteRestrictedLicense}
+        rolePermissions={rolePermissions}
+        onToggleRolePermission={toggleRolePermission}
       />
     ),
   };
@@ -740,7 +896,7 @@ export default function FleetOpzApp() {
     expenses: { title: "Expense Management", sub: "Log and track running costs" },
     pl: { title: "P&L Reports", sub: "Profitability by car and fleet" },
     alerts: { title: "Alerts", sub: `${fleetData.alerts.length} active alerts` },
-    settings: { title: "Settings", sub: "Company profile and users" },
+    userManagement: { title: "User Management", sub: "Manage system users, roles, permissions and audit logs" },
   };
 
   const ALLOWED_ATTACHMENT_EXTENSIONS = ["jpg", "jpeg", "png", "pdf", "doc", "docx", "xls", "xlsx"];
@@ -821,6 +977,15 @@ export default function FleetOpzApp() {
       r => normalizeLicense(r.licenseNumber) === normalizeLicense(newBookingData.license)
     );
     if (restrictedMatch) {
+      if (fleetData.notificationSettings.system.restrictedDriverAttempt) {
+        fleetData.addManualAlert({
+          type: "restrictedDriverAttempt",
+          plate: newBookingData.plate || "",
+          car: fleetData.fleet.find(c => c.plate === newBookingData.plate) ? `${fleetData.fleet.find(c => c.plate === newBookingData.plate).make} ${fleetData.fleet.find(c => c.plate === newBookingData.plate).model}` : "",
+          msg: `Booking attempt blocked — restricted license "${newBookingData.license}" (${newBookingData.customer || "unknown customer"})`,
+          urgent: true,
+        });
+      }
       alert("This driving license has an active criminal case. Booking cannot be created.");
       return;
     }
@@ -923,6 +1088,16 @@ export default function FleetOpzApp() {
     // agreement is only generated once Vehicle Handover happens — from the
     // Edit Booking flow's Review step (see handleCompleteHandover).
     setCreatedBookingInfo({ booking: createdBooking, car: selectedCar });
+    if (fleetData.notificationSettings.email.bookingConfirmation) {
+      const c = fleetData.fleet.find(f => f.plate === createdBooking.plate);
+      fleetData.addManualAlert({
+        type: "bookingConfirmation",
+        plate: createdBooking.plate,
+        car: c ? `${c.make} ${c.model}` : "",
+        msg: `Booking confirmed for ${createdBooking.customer}`,
+        urgent: false,
+      });
+    }
   };
 
   // Called from the "Done" button that replaces "Confirm & Create Booking"
@@ -1084,6 +1259,15 @@ export default function FleetOpzApp() {
             <div style={{ fontSize: 11, color: C.textMuted }}>{topbar[active]?.sub}</div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {active === "userManagement" && (
+              <input
+                type="text"
+                value={userTopbarSearch}
+                onChange={(e) => setUserTopbarSearch(e.target.value)}
+                placeholder="Search users..."
+                style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "7px 12px", fontSize: 12, color: C.textPri, fontFamily: "inherit", outline: "none", width: 200 }}
+              />
+            )}
             <select value={selectedCar} onChange={e => setSelectedCar(e.target.value)}
               style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "6px 10px", fontSize: 12, color: C.textPri, fontFamily: "inherit", cursor: "pointer", outline: "none" }}>
               <option>All Cars</option>
@@ -1105,6 +1289,65 @@ export default function FleetOpzApp() {
               <option value="2026-11">November 2026</option>
               <option value="2026-12">December 2026</option>
             </select>
+
+            {/* Notification bell — badge shows unread alert count, click jumps to Alerts screen */}
+            <div ref={notifMenuRef} style={{ position: "relative" }}>
+              <div
+                onClick={() => setActive("alerts")}
+                title="Alerts"
+                style={{ width: 34, height: 34, borderRadius: "50%", background: C.bg, border: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", fontSize: 15, position: "relative" }}
+              >
+                🔔
+                {fleetData.alerts.filter(a => !a.read).length > 0 && (
+                  <span style={{ position: "absolute", top: -4, right: -4, background: C.red, color: "#fff", fontSize: 9, fontWeight: 700, borderRadius: 10, minWidth: 16, height: 16, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px" }}>
+                    {fleetData.alerts.filter(a => !a.read).length}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Profile dropdown */}
+            <div ref={profileMenuRef} style={{ position: "relative" }}>
+              <div
+                onClick={() => setProfileMenuOpen(o => !o)}
+                style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", padding: "4px 8px 4px 4px", borderRadius: 20, border: `1px solid ${profileMenuOpen ? C.border : "transparent"}` }}
+              >
+                <div style={{ width: 30, height: 30, borderRadius: "50%", background: C.teal, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700 }}>A</div>
+                <div style={{ lineHeight: 1.2 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: C.navy }}>Administrator</div>
+                  <div style={{ fontSize: 10, color: C.textMuted }}>Super Admin</div>
+                </div>
+                <span style={{ fontSize: 10, color: C.textMuted, marginLeft: 2 }}>▾</span>
+              </div>
+
+              {profileMenuOpen && (
+                <div style={{ position: "absolute", top: "calc(100% + 8px)", right: 0, width: 210, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 10px 30px rgba(0,0,0,0.12)", overflow: "hidden", zIndex: 200 }}>
+                  {[
+                    { label: "Company Profile", sub: "View and edit company details", icon: "🏢", onClick: openCompanyProfile },
+                    { label: "Settings", sub: "System settings and preferences", icon: "⚙️", onClick: openSettings },
+                    { label: "Alerts", sub: "View all system alerts", icon: "🔔", onClick: () => { setActive("alerts"); setProfileMenuOpen(false); } },
+                    { label: "Change Password", sub: "", icon: "🔑", onClick: openChangePassword },
+                    { label: "Logout", sub: "", icon: "🚪", onClick: handleLogout, danger: true },
+                  ].map((item, i, arr) => (
+                    <div key={item.label}>
+                      <div
+                        onClick={item.onClick}
+                        style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "10px 14px", cursor: "pointer", background: "transparent" }}
+                        onMouseEnter={(e) => e.currentTarget.style.background = C.bg}
+                        onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+                      >
+                        <span style={{ fontSize: 14, marginTop: 1 }}>{item.icon}</span>
+                        <div>
+                          <div style={{ fontSize: 12.5, fontWeight: 600, color: item.danger ? C.red : C.navy }}>{item.label}</div>
+                          {item.sub && <div style={{ fontSize: 10, color: C.textMuted, marginTop: 1 }}>{item.sub}</div>}
+                        </div>
+                      </div>
+                      {i < arr.length - 1 && i === 2 && <div style={{ borderTop: `1px solid ${C.border}`, margin: "4px 0" }} />}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </header>
 
@@ -1987,6 +2230,271 @@ export default function FleetOpzApp() {
           </div>
         </>
       )}
+
+      {/* COMPANY PROFILE MODAL */}
+      {showCompanyProfileModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 300, padding: 20 }}
+          onClick={() => setShowCompanyProfileModal(false)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 640, maxHeight: "90vh", overflowY: "auto", background: C.surface, borderRadius: 14, border: `1px solid ${C.border}`, padding: 24 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 18 }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: C.navy }}>Company Profile</div>
+                <div style={{ fontSize: 11, color: C.textMuted }}>Update your company information and preferences</div>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                {!companyProfileEditing ? (
+                  <Btn small primary onClick={() => setCompanyProfileEditing(true)}>✏️ Edit Profile</Btn>
+                ) : (
+                  <>
+                    <Btn small onClick={() => { setCompanyProfileDraft(companyProfile); setCompanyProfileEditing(false); }}>Cancel</Btn>
+                    <Btn small primary onClick={saveCompanyProfile}>Save Changes</Btn>
+                  </>
+                )}
+                <Btn small onClick={() => setShowCompanyProfileModal(false)}>✕</Btn>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 20, marginBottom: 20 }}>
+              <div style={{ flexShrink: 0, textAlign: "center" }}>
+                <div style={{ width: 96, height: 96, borderRadius: 10, border: `1px dashed ${C.border}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", background: C.bg, marginBottom: 8 }}>
+                  {companyProfileDraft.logo
+                    ? <img src={companyProfileDraft.logo} alt="Company logo" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                    : <span style={{ fontSize: 28 }}>🚗</span>}
+                </div>
+                {companyProfileEditing && (
+                  <label style={{ fontSize: 10.5, color: C.teal, fontWeight: 600, cursor: "pointer" }}>
+                    Change Logo
+                    <input type="file" accept="image/*" onChange={handleLogoChange} style={{ display: "none" }} />
+                  </label>
+                )}
+              </div>
+              <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                {[
+                  ["name", "Company Name"], ["email", "Email"], ["phone", "Phone"],
+                  ["address", "Address"], ["currency", "Currency"], ["timezone", "Timezone"],
+                  ["gstNumber", "GST / Tax Number"], ["businessRegNumber", "Business Registration Number"], ["dateFormat", "Date Format"],
+                ].map(([key, label]) => (
+                  <div key={key} style={key === "address" ? { gridColumn: "1 / -1" } : undefined}>
+                    <label style={bookingFieldLabelStyle}>{label}</label>
+                    {companyProfileEditing ? (
+                      <input
+                        value={companyProfileDraft[key]}
+                        onChange={(e) => setCompanyProfileDraft({ ...companyProfileDraft, [key]: e.target.value })}
+                        style={bookingFieldInputStyle(false)}
+                      />
+                    ) : (
+                      <div style={{ fontSize: 12.5, color: C.textPri, padding: "10px 0" }}>{companyProfile[key] || "—"}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SETTINGS MODAL — Notifications + System Preferences */}
+      {showSettingsModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 300, padding: 20 }}
+          onClick={() => setShowSettingsModal(false)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 920, maxHeight: "90vh", overflowY: "auto", background: C.surface, borderRadius: 14, border: `1px solid ${C.border}`, padding: 24 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: C.navy }}>Settings</div>
+              <Btn small onClick={() => setShowSettingsModal(false)}>✕</Btn>
+            </div>
+
+            {/* Notifications */}
+            <div style={{ marginBottom: 28 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+                <div>
+                  <div style={{ fontSize: 13.5, fontWeight: 700, color: C.navy }}>Notifications</div>
+                  <div style={{ fontSize: 11, color: C.textMuted }}>Configure email and system notification settings</div>
+                </div>
+                <Btn small primary onClick={saveNotificationDraft}>Save Changes</Btn>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 20 }}>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: C.textSec, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>Email Notifications</div>
+                  {[
+                    ["bookingConfirmation", "Booking Confirmation"],
+                    ["bookingCancellation", "Booking Cancellation"],
+                    ["paymentReceived", "Payment Received"],
+                    ["maintenanceReminder", "Maintenance Reminder"],
+                    ["insuranceExpiry", "Insurance Expiry"],
+                    ["coeExpiry", "COE Expiry"],
+                    ["vehicleReturnReminder", "Vehicle Return Reminder"],
+                    ["customerPaymentReminder", "Customer Payment Reminder"],
+                  ].map(([key, label]) => (
+                    <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: C.textPri, padding: "5px 0", cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={!!notifDraft.email[key]}
+                        onChange={(e) => setNotifDraft({ ...notifDraft, email: { ...notifDraft.email, [key]: e.target.checked } })}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: C.textSec, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>System Alerts</div>
+                  {[
+                    ["lowVehicleAvailability", "Low Vehicle Availability"],
+                    ["overdueReturn", "Overdue Return"],
+                    ["pendingPayments", "Pending Payments"],
+                    ["restrictedDriverAttempt", "Restricted Driver Attempt"],
+                    ["failedLoginAttempts", "Failed Login Attempts"],
+                  ].map(([key, label]) => (
+                    <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: C.textPri, padding: "5px 0", cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={!!notifDraft.system[key]}
+                        onChange={(e) => setNotifDraft({ ...notifDraft, system: { ...notifDraft.system, [key]: e.target.checked } })}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: C.textSec, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>Reminder Timing</div>
+                  {[
+                    ["maintenanceReminderDays", "Maintenance Reminder"],
+                    ["insuranceReminderDays", "Insurance Reminder"],
+                    ["coeReminderDays", "COE Reminder"],
+                    ["paymentReminderDays", "Payment Reminder"],
+                  ].map(([key, label]) => (
+                    <div key={key} style={{ marginBottom: 10 }}>
+                      <label style={{ fontSize: 11, color: C.textMuted, display: "block", marginBottom: 3 }}>{label}</label>
+                      <select
+                        value={notifDraft.reminders[key]}
+                        onChange={(e) => setNotifDraft({ ...notifDraft, reminders: { ...notifDraft.reminders, [key]: Number(e.target.value) } })}
+                        style={bookingFieldInputStyle(false)}
+                      >
+                        {[7, 15, 30, 60, 90].map(d => <option key={d} value={d}>{d} Days Before</option>)}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* System Preferences */}
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+                <div>
+                  <div style={{ fontSize: 13.5, fontWeight: 700, color: C.navy }}>System Preferences</div>
+                  <div style={{ fontSize: 11, color: C.textMuted }}>Configure general system preferences and default settings</div>
+                </div>
+                <Btn small primary onClick={savePreferencesDraft}>Save Changes</Btn>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 20 }}>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: C.textSec, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>General Settings</div>
+                  {[["currency", "Company Currency"], ["timezone", "Timezone"], ["dateFormat", "Date Format"], ["language", "Language"]].map(([key, label]) => (
+                    <div key={key} style={{ marginBottom: 10 }}>
+                      <label style={{ fontSize: 11, color: C.textMuted, display: "block", marginBottom: 3 }}>{label}</label>
+                      <input
+                        value={prefsDraft.general[key]}
+                        onChange={(e) => setPrefsDraft({ ...prefsDraft, general: { ...prefsDraft.general, [key]: e.target.value } })}
+                        style={bookingFieldInputStyle(false)}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: C.textSec, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>Booking Defaults</div>
+                  {[["defaultRentalDuration", "Default Rental Duration"], ["gracePeriod", "Grace Period"]].map(([key, label]) => (
+                    <div key={key} style={{ marginBottom: 10 }}>
+                      <label style={{ fontSize: 11, color: C.textMuted, display: "block", marginBottom: 3 }}>{label}</label>
+                      <input
+                        value={prefsDraft.bookingDefaults[key]}
+                        onChange={(e) => setPrefsDraft({ ...prefsDraft, bookingDefaults: { ...prefsDraft.bookingDefaults, [key]: e.target.value } })}
+                        style={bookingFieldInputStyle(false)}
+                      />
+                    </div>
+                  ))}
+                  {[["lateReturnCharge", "Late Return Charge"], ["securityDepositRequired", "Security Deposit Required"], ["autoGenerateBookingNo", "Auto-Generate Booking No."]].map(([key, label]) => (
+                    <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: C.textPri, padding: "5px 0", cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={!!prefsDraft.bookingDefaults[key]}
+                        onChange={(e) => setPrefsDraft({ ...prefsDraft, bookingDefaults: { ...prefsDraft.bookingDefaults, [key]: e.target.checked } })}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: C.textSec, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>Customer Settings</div>
+                  {[
+                    ["allowDuplicatePhoneNumber", "Allow Duplicate Phone Number"],
+                    ["requireDrivingLicense", "Require Driving License"],
+                    ["requireICPassport", "Require IC / Passport"],
+                    ["autoMarkCustomerActive", "Auto Mark Customer Active"],
+                  ].map(([key, label]) => (
+                    <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0" }}>
+                      <span style={{ fontSize: 12, color: C.textPri }}>{label}</span>
+                      <div
+                        onClick={() => setPrefsDraft({ ...prefsDraft, customerSettings: { ...prefsDraft.customerSettings, [key]: !prefsDraft.customerSettings[key] } })}
+                        style={{ width: 36, height: 20, borderRadius: 10, background: prefsDraft.customerSettings[key] ? C.teal : C.border, position: "relative", cursor: "pointer", flexShrink: 0 }}
+                      >
+                        <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: prefsDraft.customerSettings[key] ? 18 : 2, transition: "left 0.15s" }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: C.textSec, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>Fleet Settings</div>
+                  <div style={{ marginBottom: 10 }}>
+                    <label style={{ fontSize: 11, color: C.textMuted, display: "block", marginBottom: 3 }}>Default Vehicle Status</label>
+                    <select
+                      value={prefsDraft.fleetSettings.defaultVehicleStatus}
+                      onChange={(e) => setPrefsDraft({ ...prefsDraft, fleetSettings: { ...prefsDraft.fleetSettings, defaultVehicleStatus: e.target.value } })}
+                      style={bookingFieldInputStyle(false)}
+                    >
+                      <option>Available</option>
+                      <option>Maintenance</option>
+                    </select>
+                  </div>
+                  <div style={{ fontSize: 10.5, color: C.textMuted, lineHeight: 1.5 }}>
+                    Maintenance / Insurance / COE reminder timing is set above under Notifications → Reminder Timing.
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CHANGE PASSWORD MODAL */}
+      <Modal
+        open={showChangePasswordModal}
+        title="Change Password"
+        onClose={() => setShowChangePasswordModal(false)}
+        onSubmit={submitChangePassword}
+        submitText="Update Password"
+      >
+        <Input
+          label="Current Password"
+          type="password"
+          value={passwordForm.current}
+          onChange={(e) => setPasswordForm({ ...passwordForm, current: e.target.value })}
+          placeholder="Enter current password"
+        />
+        <Input
+          label="New Password"
+          type="password"
+          value={passwordForm.next}
+          onChange={(e) => setPasswordForm({ ...passwordForm, next: e.target.value })}
+          placeholder="At least 6 characters"
+        />
+        <Input
+          label="Confirm New Password"
+          type="password"
+          value={passwordForm.confirm}
+          onChange={(e) => setPasswordForm({ ...passwordForm, confirm: e.target.value })}
+          placeholder="Re-enter new password"
+        />
+      </Modal>
 
       {/* NEW USER MODAL */}
       <Modal

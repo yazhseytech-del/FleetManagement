@@ -32,6 +32,42 @@ const savePersisted = (key, value) => {
   }
 };
 
+// ── NOTIFICATION SETTINGS / SYSTEM PREFERENCES defaults ─────────────────────
+// Persisted the same way as fleet/bookings/earnings/expenses above. These
+// drive real alert generation in generateAlerts() below — not just UI state.
+export const DEFAULT_NOTIFICATION_SETTINGS = {
+  email: {
+    bookingConfirmation: true,
+    bookingCancellation: true,
+    paymentReceived: true,
+    maintenanceReminder: true,
+    insuranceExpiry: true,
+    coeExpiry: true,
+    vehicleReturnReminder: true,
+    customerPaymentReminder: true,
+  },
+  system: {
+    lowVehicleAvailability: true,
+    overdueReturn: true,
+    pendingPayments: true,
+    restrictedDriverAttempt: true,
+    failedLoginAttempts: true,
+  },
+  reminders: {
+    maintenanceReminderDays: 30,
+    insuranceReminderDays: 15,
+    coeReminderDays: 90,
+    paymentReminderDays: 7,
+  },
+};
+
+export const DEFAULT_SYSTEM_PREFERENCES = {
+  general: { currency: "SGD (Singapore Dollar)", timezone: "(GMT+08:00) Singapore", dateFormat: "DD/MM/YYYY", language: "English" },
+  bookingDefaults: { defaultRentalDuration: "1 Day", gracePeriod: "30 Minutes", lateReturnCharge: true, securityDepositRequired: true, autoGenerateBookingNo: true },
+  customerSettings: { allowDuplicatePhoneNumber: false, requireDrivingLicense: true, requireICPassport: true, autoMarkCustomerActive: true },
+  fleetSettings: { defaultVehicleStatus: "Available" },
+};
+
 // A car should never sit in "Maintenance" for more than this many days before
 // being auto-released back to "Available" (see the effect below). Exported so
 // anything projecting future availability (e.g. the Booking module's 10-day
@@ -365,12 +401,51 @@ export const useFleetData = () => {
   const [earnings, setEarnings] = useState(() => loadPersisted("earnings", INITIAL_EARNINGS));
   const [expenses, setExpenses] = useState(() => loadPersisted("expenses", INITIAL_EXPENSES));
 
+  // Notification settings + system preferences (Settings screen), and the
+  // event-based alert log (Booking Confirmation, Booking Cancellation,
+  // Payment Received, Restricted Driver Attempt) + read/unread tracking for
+  // the Alerts screen. All persisted the same way as the collections above.
+  const [notificationSettings, setNotificationSettings] = useState(() => loadPersisted("notificationSettings", DEFAULT_NOTIFICATION_SETTINGS));
+  const [systemPreferences, setSystemPreferences] = useState(() => loadPersisted("systemPreferences", DEFAULT_SYSTEM_PREFERENCES));
+  const [alertsLog, setAlertsLog] = useState(() => loadPersisted("alertsLog", []));
+  const [readAlertIds, setReadAlertIds] = useState(() => loadPersisted("readAlertIds", []));
+
   // Persist to localStorage whenever any collection changes, so data survives
   // refreshes, tab closes, and revisits — not just the lifetime of the component.
   useEffect(() => { savePersisted("fleet", fleet); }, [fleet]);
   useEffect(() => { savePersisted("bookings", bookings); }, [bookings]);
   useEffect(() => { savePersisted("earnings", earnings); }, [earnings]);
   useEffect(() => { savePersisted("expenses", expenses); }, [expenses]);
+  useEffect(() => { savePersisted("notificationSettings", notificationSettings); }, [notificationSettings]);
+  useEffect(() => { savePersisted("systemPreferences", systemPreferences); }, [systemPreferences]);
+  useEffect(() => { savePersisted("alertsLog", alertsLog); }, [alertsLog]);
+  useEffect(() => { savePersisted("readAlertIds", readAlertIds); }, [readAlertIds]);
+
+  const updateNotificationSettings = (section, updates) => {
+    setNotificationSettings(prev => ({ ...prev, [section]: { ...prev[section], ...updates } }));
+  };
+  const updateSystemPreferences = (section, updates) => {
+    setSystemPreferences(prev => ({ ...prev, [section]: { ...prev[section], ...updates } }));
+  };
+
+  // Appends a real event-based alert (Booking Confirmation, Booking
+  // Cancellation, Payment Received, Restricted Driver Attempt). Callers
+  // check the relevant notificationSettings toggle themselves before
+  // calling this, same as generateAlerts() re-checks it below when
+  // deciding whether to actually surface the entry.
+  const addManualAlert = ({ type, plate, car, msg, urgent = false }) => {
+    setAlertsLog(prev => [
+      { id: `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, type, plate, car, msg, urgent, timestamp: new Date().toISOString() },
+      ...prev,
+    ].slice(0, 200)); // keep the log from growing unbounded
+  };
+
+  const markAlertRead = (id) => {
+    setReadAlertIds(prev => prev.includes(id) ? prev : [...prev, id]);
+  };
+  const markAllAlertsRead = (ids) => {
+    setReadAlertIds(prev => Array.from(new Set([...prev, ...ids])));
+  };
 
   const todayStr = new Date().toISOString().split("T")[0];
 
@@ -699,81 +774,177 @@ export const useFleetData = () => {
   const generateAlerts = () => {
     const alerts = [];
     const today = new Date().toISOString().split("T")[0];
-    let alertId = 1;
+    const nowIso = new Date().toISOString();
+    const settings = notificationSettings;
+    const { maintenanceReminderDays, insuranceReminderDays, coeReminderDays, paymentReminderDays } = settings.reminders;
 
-    // Vehicle registration renewal alerts (car.coe holds the renewal/expiry
-    // date field name — kept for data compatibility, relabeled everywhere in the UI)
-    fleet.forEach(car => {
-      const coeDate = new Date(car.coe);
-      const today_date = new Date(today);
-      const daysUntil = Math.ceil((coeDate - today_date) / (1000 * 60 * 60 * 24));
+    const push = (id, entry) => alerts.push({ id, timestamp: nowIso, ...entry });
 
-      if (daysUntil <= 90) {
-        alerts.push({
-          id: alertId++,
-          type: "coe",
-          plate: car.plate,
-          car: `${car.make} ${car.model}`,
-          msg: `Vehicle registration renewal due ${car.coe}`,
-          days: Math.max(0, daysUntil),
-          urgent: daysUntil <= 30,
+    // Vehicle registration renewal (COE Expiry) — threshold from Settings →
+    // Notifications → Reminder Timing → COE Reminder (default 90 days).
+    if (settings.email.coeExpiry) {
+      fleet.forEach(car => {
+        const daysUntil = Math.ceil((new Date(car.coe) - new Date(today)) / (1000 * 60 * 60 * 24));
+        if (daysUntil <= coeReminderDays) {
+          push(`coe-${car.plate}`, {
+            type: "coe", plate: car.plate, car: `${car.make} ${car.model}`,
+            msg: `Vehicle registration renewal due ${car.coe}`,
+            days: Math.max(0, daysUntil), urgent: daysUntil <= 30,
+          });
+        }
+      });
+    }
+
+    // Insurance Expiry — only fires for cars that carry an explicit
+    // `insuranceExpiry` date field. The sample fleet data only tracks an
+    // `insurance` cost (not an expiry date), so this stays dormant until a
+    // real insurance-expiry date is added to a car record; it won't error
+    // either way.
+    if (settings.email.insuranceExpiry) {
+      fleet.forEach(car => {
+        if (!car.insuranceExpiry) return;
+        const daysUntil = Math.ceil((new Date(car.insuranceExpiry) - new Date(today)) / (1000 * 60 * 60 * 24));
+        if (daysUntil <= insuranceReminderDays) {
+          push(`insurance-${car.plate}`, {
+            type: "insurance", plate: car.plate, car: `${car.make} ${car.model}`,
+            msg: `Insurance renewal due ${car.insuranceExpiry}`,
+            days: Math.max(0, daysUntil), urgent: daysUntil <= 7,
+          });
+        }
+      });
+    }
+
+    // Maintenance pending — threshold from Reminder Timing → Maintenance
+    // Reminder (interpreted here as "days into maintenance" trigger point).
+    if (settings.email.maintenanceReminder) {
+      fleet.forEach(car => {
+        if (car.status !== "Maintenance" || !car.maintenanceStartDate) return;
+        const daysIn = Math.floor((new Date(today) - new Date(car.maintenanceStartDate)) / (1000 * 60 * 60 * 24));
+        const threshold = Math.min(maintenanceReminderDays, MAINTENANCE_MAX_DAYS - 1);
+        if (daysIn >= threshold) {
+          push(`maintenance-${car.plate}`, {
+            type: "maintenance", plate: car.plate, car: `${car.make} ${car.model}`,
+            msg: `In maintenance for ${daysIn} day${daysIn === 1 ? "" : "s"} — update or complete maintenance`,
+            days: daysIn, urgent: daysIn >= MAINTENANCE_MAX_DAYS,
+          });
+        }
+      });
+    }
+
+    // Vehicle Return Reminder — booking due back today.
+    if (settings.email.vehicleReturnReminder) {
+      bookingsWithStatus.forEach(b => {
+        const endDate = new Date(b.end).toISOString().split("T")[0];
+        if (endDate === today && b.status === "Ending Today") {
+          const c = fleet.find(f => f.plate === b.plate);
+          push(`return-${b.id}`, {
+            type: "return", plate: b.plate, car: c ? `${c.make} ${c.model}` : "",
+            msg: `${b.customer} — Return by 6 PM`, days: 0, urgent: true,
+          });
+        }
+      });
+    }
+
+    // Overdue Return — return date has already passed without an actual
+    // Vehicle Return being recorded (computeBookingStatus keeps these
+    // "Ending Today" past the end date too, so distinguish by date math).
+    if (settings.system.overdueReturn) {
+      bookingsWithStatus.forEach(b => {
+        const endDate = new Date(b.end).toISOString().split("T")[0];
+        if (b.status === "Ending Today" && endDate < today) {
+          const c = fleet.find(f => f.plate === b.plate);
+          const daysOverdue = Math.floor((new Date(today) - new Date(endDate)) / (1000 * 60 * 60 * 24));
+          push(`overdue-${b.id}`, {
+            type: "overdue", plate: b.plate, car: c ? `${c.make} ${c.model}` : "",
+            msg: `${b.customer} — ${daysOverdue} day${daysOverdue === 1 ? "" : "s"} overdue for return`,
+            days: daysOverdue, urgent: true,
+          });
+        }
+      });
+    }
+
+    // Upcoming booking (starts tomorrow) — kept as part of Vehicle Return
+    // Reminder's family since it's the same "day before" operational nudge.
+    if (settings.email.vehicleReturnReminder) {
+      const tomorrow = new Date(new Date().getTime() + 86400000).toISOString().split("T")[0];
+      bookings.forEach(b => {
+        const startDate = new Date(b.start).toISOString().split("T")[0];
+        if (startDate === tomorrow && (b.status === "Upcoming" || b.status === "Active")) {
+          const c = fleet.find(f => f.plate === b.plate);
+          push(`booking-${b.id}`, {
+            type: "booking", plate: b.plate, car: c ? `${c.make} ${c.model}` : "",
+            msg: `${b.customer} booking starts tomorrow`, days: 1, urgent: false,
+          });
+        }
+      });
+    }
+
+    // Pending Payments — a Completed booking (returned) still carrying a
+    // balance due, once it's been outstanding for at least Payment Reminder
+    // (Customer Payment Reminder) days.
+    if (settings.system.pendingPayments) {
+      bookingsWithStatus.forEach(b => {
+        if (b.status !== "Completed") return;
+        const { balanceDue } = computeBookingInvoice(b);
+        if (balanceDue <= 0) return;
+        const endDate = new Date(b.end).toISOString().split("T")[0];
+        const daysSince = Math.floor((new Date(today) - new Date(endDate)) / (1000 * 60 * 60 * 24));
+        if (daysSince >= paymentReminderDays) {
+          const c = fleet.find(f => f.plate === b.plate);
+          push(`pending-${b.id}`, {
+            type: "pending", plate: b.plate, car: c ? `${c.make} ${c.model}` : "",
+            msg: `${b.customer} — balance of ${balanceDue.toFixed(2)} outstanding (${daysSince} days)`,
+            days: daysSince, urgent: daysSince >= paymentReminderDays * 2,
+          });
+        }
+      });
+    }
+
+    // Low Vehicle Availability — fleet-wide, not per car.
+    if (settings.system.lowVehicleAvailability) {
+      const availableCount = fleetWithStatus.filter(c => c.status === "Available").length;
+      if (availableCount <= 2) {
+        push(`lowavail-${today}`, {
+          type: "lowavail", plate: "", car: "",
+          msg: `Only ${availableCount} vehicle${availableCount === 1 ? "" : "s"} available across the fleet`,
+          days: 0, urgent: availableCount === 0,
         });
       }
+    }
+
+    // Event-based alerts (Booking Confirmation, Booking Cancellation,
+    // Payment Received, Restricted Driver Attempt, Failed Login Attempts) —
+    // logged as they happen by addManualAlert / the failed-login log, then
+    // re-filtered here against the current toggle so turning a setting off
+    // stops it appearing even for already-logged entries.
+    const settingFor = {
+      bookingConfirmation: settings.email.bookingConfirmation,
+      bookingCancellation: settings.email.bookingCancellation,
+      paymentReceived: settings.email.paymentReceived,
+      restrictedDriverAttempt: settings.system.restrictedDriverAttempt,
+    };
+    alertsLog.forEach(entry => {
+      if (settingFor[entry.type] === false) return;
+      alerts.push({ ...entry });
     });
 
-    // Maintenance pending alerts — a car that's been sitting in "Maintenance"
-    // for 2+ days without being completed. It will auto-release at day 3
-    // regardless (see the effect above), but this flags it before that happens.
-    fleet.forEach(car => {
-      if (car.status !== "Maintenance" || !car.maintenanceStartDate) return;
-      const daysIn = Math.floor((new Date(today) - new Date(car.maintenanceStartDate)) / (1000 * 60 * 60 * 24));
-      if (daysIn >= 2) {
+    // Failed Login Attempts — logged directly to localStorage by
+    // AuthContext.jsx on a failed login (before this hook even mounts), so
+    // it's read back the same way here rather than through alertsLog.
+    if (settings.system.failedLoginAttempts) {
+      const failedLoginLog = loadPersisted("failedLoginLog", []);
+      failedLoginLog.forEach(entry => {
         alerts.push({
-          id: alertId++,
-          type: "maintenance",
-          plate: car.plate,
-          car: `${car.make} ${car.model}`,
-          msg: `In maintenance for ${daysIn} day${daysIn === 1 ? "" : "s"} — update or complete maintenance`,
-          days: daysIn,
-          urgent: daysIn >= 3,
+          id: entry.id, type: "failedLogin", plate: "", car: "",
+          msg: `Failed login attempt for "${entry.username}"`,
+          days: 0, urgent: true, timestamp: entry.timestamp,
         });
-      }
-    });
+      });
+    }
 
-    // Booking return today alerts
-    bookingsWithStatus.forEach(b => {
-      const endDate = new Date(b.end).toISOString().split("T")[0];
-      if (endDate === today && (b.status === "Active" || b.status === "Ending Today")) {
-        alerts.push({
-          id: alertId++,
-          type: "return",
-          plate: b.plate,
-          car: fleet.find(c => c.plate === b.plate)?.make + " " + fleet.find(c => c.plate === b.plate)?.model,
-          msg: `${b.customer} — Return by 6 PM`,
-          days: 0,
-          urgent: true,
-        });
-      }
-    });
-
-    // Upcoming booking alerts
-    const tomorrow = new Date(new Date().getTime() + 86400000).toISOString().split("T")[0];
-    bookings.forEach(b => {
-      const startDate = new Date(b.start).toISOString().split("T")[0];
-      if (startDate === tomorrow && (b.status === "Upcoming" || b.status === "Active")) {
-        alerts.push({
-          id: alertId++,
-          type: "booking",
-          plate: b.plate,
-          car: fleet.find(c => c.plate === b.plate)?.make + " " + fleet.find(c => c.plate === b.plate)?.model,
-          msg: `${b.customer} booking starts tomorrow`,
-          days: 1,
-          urgent: false,
-        });
-      }
-    });
-
-    return alerts;
+    return alerts
+      .map(a => ({ ...a, read: readAlertIds.includes(a.id) }))
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
   };
 
   // Wipes saved data and restores the original sample data — handy if local
@@ -793,6 +964,15 @@ export const useFleetData = () => {
     expenses,
     alerts: generateAlerts(),
     resetData,
+
+    // Settings / notifications
+    notificationSettings,
+    updateNotificationSettings,
+    systemPreferences,
+    updateSystemPreferences,
+    addManualAlert,
+    markAlertRead,
+    markAllAlertsRead,
 
     // Fleet operations
     addFleet,

@@ -360,7 +360,7 @@ const BookingActivityTimeline = ({ booking, inv }) => {
 // Opens either from clicking "View" on a row in the Bookings table, or
 // automatically right after a new booking is created (see `detailBookingId`
 // prop on <Booking>).
-const BookingDetailModal = ({ booking, bookings, fleet, activeTab, setActiveTab, onClose, onUpdateBooking, onEditBooking }) => {
+const BookingDetailModal = ({ booking, bookings, fleet, activeTab, setActiveTab, onClose, onUpdateBooking, onEditBooking, onPaymentReceived }) => {
   const [mileageIn, setMileageIn] = useState(booking.mileageIn || "");
   const [fuelIn, setFuelIn] = useState(booking.fuelIn || "Full");
   // Fuel Charge is entered manually by staff at return time — there's no
@@ -479,6 +479,14 @@ const BookingDetailModal = ({ booking, bookings, fleet, activeTab, setActiveTab,
       addedAt: `${paymentDate}T${paymentTime}`,
     };
     onUpdateBooking(booking.id, { payments: [...inv.payments, newPayment] });
+    const carLabel = fleet.find(c => c.plate === booking.plate);
+    onPaymentReceived?.({
+      type: "paymentReceived",
+      plate: booking.plate,
+      car: carLabel ? `${carLabel.make} ${carLabel.model}` : "",
+      msg: `${fmt(amt)} received from ${booking.customer} via ${paymentMethod}`,
+      urgent: false,
+    });
     setPaymentAmount("");
     setPaymentDate(new Date().toISOString().slice(0, 10));
     setPaymentTime(new Date().toTimeString().slice(0, 5));
@@ -909,7 +917,7 @@ const BookingDetailModal = ({ booking, bookings, fleet, activeTab, setActiveTab,
   );
 };
 
-const Booking = ({ bookings = [], fleet = [], onNewBooking, onAddBooking, onUpdateBooking, onDeleteBooking, detailBookingId, onDetailBookingIdHandled, onEditBooking, selectedCar = "All Cars", selectedRange = "all" }) => {
+const Booking = ({ bookings = [], fleet = [], onNewBooking, onAddBooking, onUpdateBooking, onDeleteBooking, detailBookingId, onDetailBookingIdHandled, onEditBooking, selectedCar = "All Cars", selectedRange = "all", onBookingCancelled, onPaymentReceived }) => {
   const [filter, setFilter] = useState("All");
   const [timelinePlate, setTimelinePlate] = useState(null);
   const [openDetailId, setOpenDetailId] = useState(null);
@@ -968,7 +976,18 @@ const Booking = ({ bookings = [], fleet = [], onNewBooking, onAddBooking, onUpda
 
   const handleDelete = (bookingId) => {
     if (window.confirm("Are you sure you want to delete this booking?")) {
+      const cancelled = bookings.find(b => b.id === bookingId);
       onDeleteBooking(bookingId);
+      if (cancelled) {
+        const c = fleet.find(f => f.plate === cancelled.plate);
+        onBookingCancelled?.({
+          type: "bookingCancellation",
+          plate: cancelled.plate,
+          car: c ? `${c.make} ${c.model}` : "",
+          msg: `Booking for ${cancelled.customer} was cancelled`,
+          urgent: false,
+        });
+      }
     }
   };
 
@@ -1105,6 +1124,7 @@ const Booking = ({ bookings = [], fleet = [], onNewBooking, onAddBooking, onUpda
           onClose={() => setOpenDetailId(null)}
           onUpdateBooking={onUpdateBooking}
           onEditBooking={onEditBooking}
+          onPaymentReceived={onPaymentReceived}
         />
       )}
     </div>
